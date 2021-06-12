@@ -1879,7 +1879,7 @@ function bail (err) {
   process.exit(2);
 }
 
-const version = '1.0.0';
+const version = '1.0.1';
 const opts = mri(process.argv.slice(2), {
   alias: {
     port: 'p',
