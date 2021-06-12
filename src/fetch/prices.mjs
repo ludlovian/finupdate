@@ -1,5 +1,4 @@
 import log from 'logjs'
-import teme from 'teme'
 
 import { get, put } from '../db.mjs'
 import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
@@ -52,10 +51,11 @@ async function * getPrices (tickers) {
 
   for (const [name, fetchFunc] of attempts) {
     let n = 0
-    const prices = teme(fetchFunc(name))
-      .filter(isNeeded)
-      .each(() => n++)
-    yield * prices
+    for await (const price of fetchFunc(name)) {
+      if (!isNeeded(price)) continue
+      n++
+      yield price
+    }
     debug('%d prices from %s', n, name)
 
     if (!needed.size) return
