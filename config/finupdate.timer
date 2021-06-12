@@ -1,0 +1,10 @@
+[Unit]
+Description=Runs finupdate service
+Requires=finupdate.service
+
+[Timer]
+Unit=finupdate.service
+OnCalendar=Mon..Fri 08..16:30:00
+
+[Install]
+WantedBy=timers.target

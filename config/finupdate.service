@@ -1,0 +1,10 @@
+[Unit]
+Description=Update financials
+After=network.target
+
+[Service]
+User=alan
+WorkingDirectory=/home/alan/dev/finupdate
+Environment=NODE_ENV=production
+Environment=LOGLEVEL=2
+ExecStart=/usr/local/bin/node dist/finupdate.mjs import fetch export
