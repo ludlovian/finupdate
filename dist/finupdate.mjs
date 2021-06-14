@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { format } from 'util';
-import { request as request$1 } from 'http';
-import { get as get$2 } from 'https';
+import { homedir } from 'os';
+import { resolve, extname } from 'path';
+import SQLite from 'better-sqlite3';
+import { get as get$1 } from 'https';
 import { stat, writeFile, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
 import { createReadStream } from 'fs';
-import { extname } from 'path';
 import mime from 'mime/lite.js';
 import { createHash } from 'crypto';
 
@@ -414,60 +415,299 @@ function getFactor (n) {
   return n in factors ? factors[n] : (factors[n] = big(10) ** big(n))
 }
 
-const decimalFields = new Set(['price', 'dividend', 'cost', 'qty', 'gain']);
+const DB_NAME = 'findb.sqlite';
 
-function get$1 (path, { port }) {
-  return request({ port, path, method: 'GET' }).then(res => res.data)
-}
+const t = s =>
+  s[0]
+    .split(/\n/)
+    .map(s => s.trim())
+    .join(' ');
 
-function put (path, body, { port }) {
-  return request({ port, path, body, method: 'PUT' })
-}
+const maybeDecimal = x => (x ? decimal(x) : undefined);
 
-function del (path, body, { port }) {
-  return request({ port, path, body, method: 'DELETE' })
-}
+const db = new SQLite(resolve(homedir(), '.databases', DB_NAME));
+db.pragma('journal_mode=WAL');
+db.exec(t`
+  CREATE TABLE IF NOT EXISTS stock(
+    ticker TEXT PRIMARY KEY,
+    name TEXT,
+    incomeType TEXT,
+    notes TEXT,
+    dividend TEXT,
+    price TEXT,
+    priceSource TEXT,
+    priceUpdated TEXT
+  );
+  CREATE TABLE IF NOT EXISTS position(
+    who TEXT,
+    account TEXT,
+    ticker TEXT,
+    qty TEXT,
+    PRIMARY KEY (who, account, ticker)
+  );
+  CREATE TABLE IF NOT EXISTS trade(
+    who TEXT,
+    account TEXT,
+    ticker TEXT,
+    seq INTEGER,
+    date TEXT,
+    cost TEXT,
+    qty TEXT,
+    gain TEXT,
+    notes TEXT,
+    PRIMARY KEY (who, account, ticker, seq)
+  );
+`);
 
-function reviver (k, v) {
-  return decimalFields.has(k) ? decimal(v) : v
-}
+const insertStock = db.prepare(t`
+  INSERT INTO stock (
+      ticker,
+      name,
+      incomeType,
+      notes
+    )
+    VALUES (
+      $ticker,
+      $name,
+      $incomeType,
+      $notes
+    )
+    ON CONFLICT DO
+    UPDATE SET
+      name = excluded.name,
+      incomeType = excluded.incomeType,
+      notes = excluded.notes
+`);
 
-function request (opts) {
-  return new Promise((resolve, reject) => {
-    if (opts.body) {
-      opts.body = JSON.stringify(opts.body);
-      opts.headers = {
-        'Content-Type': 'application/json',
-        'Content-Length': opts.body.length
-      };
-    }
-    const req = request$1(opts, res => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => (data += chunk));
-      res.on('end', () => {
-        const ct = res.headers['content-type'];
-        if (ct && data && ct.includes('application/json')) {
-          try {
-            data = JSON.parse(data, reviver);
-          } catch (err) {
-            return reject(err)
-          }
-        }
-        res.data = data;
-        if (res.statusCode >= 400) {
-          const err = new Error(res.statusMessage);
-          err.res = res;
-          return reject(err)
-        }
-        resolve(res);
-      });
+const clearDividends = db.prepare(t`
+  UPDATE stock
+  SET dividend = NULL
+`);
+
+const insertDividend = db.prepare(t`
+  INSERT INTO stock (ticker, dividend)
+    VALUES ($ticker, $dividend)
+    ON CONFLICT DO UPDATE
+    SET dividend = excluded.dividend
+`);
+
+const clearPositions = db.prepare(t`
+  UPDATE position
+  SET qty = NULL
+`);
+
+const insertPosition = db.prepare(t`
+  INSERT INTO position (who, account, ticker, qty)
+    VALUES ($who, $account, $ticker, $qty)
+    ON CONFLICT DO UPDATE
+    SET qty = excluded.qty
+`);
+
+const deletePositions = db.prepare(t`
+  DELETE FROM position
+  WHERE qty IS NULL
+`);
+
+const clearTrades = db.prepare(t`
+  UPDATE trade
+    SET qty = NULL,
+        cost = NULL
+`);
+
+const insertTrade = db.prepare(t`
+  INSERT INTO trade (who, account, ticker, seq, date, qty, cost, gain, notes)
+    VALUES ($who, $account, $ticker, $seq, $date, $qty, $cost, $gain, $notes)
+  ON CONFLICT DO UPDATE
+    SET date = excluded.date,
+        qty = excluded.qty,
+        cost = excluded.cost,
+        gain = excluded.gain,
+        notes = excluded.notes
+`);
+
+const deleteTrades = db.prepare(t`
+  DELETE FROM trade
+  WHERE qty IS NULL
+  AND   cost IS NULL
+`);
+
+const updateStockName = db.prepare(t`
+  UPDATE stock
+  SET   name = $name
+  WHERE ticker = $ticker
+    AND name IS NULL
+`);
+
+const clearPrices = db.prepare(t`
+  UPDATE stock
+  SET   price = NULL,
+        priceSource = NULL,
+        priceUpdated = NULL
+`);
+
+const updatePrice = db.prepare(t`
+  UPDATE stock
+  SET   price = $price,
+        priceSource = $priceSource,
+        priceUpdated = $priceUpdated
+  WHERE ticker = $ticker
+`);
+
+const selectActiveTickers = db.prepare(t`
+  SELECT ticker
+    FROM stock
+   WHERE dividend IS NOT NULL
+  UNION
+  SELECT ticker
+    FROM position
+`);
+
+const selectPositions = db.prepare(t`
+  SELECT p.ticker as ticker,
+      who,
+      account,
+      qty,
+      price,
+      dividend
+  FROM  position p
+  INNER JOIN stock s
+  WHERE p.ticker = s.ticker
+  ORDER BY ticker, who, account
+`);
+
+const selectTrades = db.prepare(t`
+  SELECT who,
+        account,
+        ticker,
+        seq,
+        date,
+        qty,
+        cost,
+        gain
+  FROM trade
+  ORDER BY who, account, ticker, seq
+`);
+
+const selectStocks = db.prepare(t`
+  SELECT ticker,
+        incomeType,
+        name,
+        price,
+        dividend,
+        notes
+  FROM stock
+  ORDER BY ticker
+`);
+
+const activeStockTickers = () => selectActiveTickers.pluck().all();
+
+const getPositions = () =>
+  selectPositions
+    .all()
+    .map(({ ticker, who, account, qty, price, dividend }) => {
+      let _yield;
+      let value;
+      let income;
+      qty = maybeDecimal(qty);
+      price = maybeDecimal(price);
+      dividend = maybeDecimal(dividend);
+      if (price && dividend) {
+        _yield = dividend
+          .withPrecision(9)
+          .div(price)
+          .withPrecision(3);
+      }
+      if (qty && price) {
+        value = price.mul(qty).withPrecision(2);
+      }
+      if (qty && dividend) {
+        income = dividend.mul(qty).withPrecision(2);
+      }
+      return {
+        ticker,
+        who,
+        account,
+        qty,
+        price,
+        dividend,
+        yield: _yield,
+        value,
+        income
+      }
     });
-    req.on('error', reject);
-    if (opts.body) req.write(opts.body);
-    req.end();
-  })
-}
+
+const getTrades = () =>
+  selectTrades.all().map(row => {
+    row.qty = maybeDecimal(row.qty);
+    row.cost = maybeDecimal(row.cost);
+    row.gain = maybeDecimal(row.gain);
+    return row
+  });
+
+const getStocks = () =>
+  selectStocks.all().map(row => ({
+    ...row,
+    price: maybeDecimal(row.price),
+    dividend: maybeDecimal(row.dividend)
+  }));
+
+const updateStockDetails = db.transaction(stocks =>
+  stocks.forEach(({ ticker, name, incomeType, notes }) =>
+    insertStock.run({
+      ticker,
+      name: name || null,
+      incomeType: incomeType || null,
+      notes: notes || null
+    })
+  )
+);
+
+const updateDividends = db.transaction(divis => {
+  clearDividends.run();
+  divis.forEach(({ ticker, dividend }) =>
+    insertDividend.run({ ticker, dividend: dividend.toString() })
+  );
+});
+
+const updatePositions = db.transaction(positions => {
+  clearPositions.run();
+  positions.forEach(({ who, account, ticker, qty }) =>
+    insertPosition.run({ who, account, ticker, qty: qty.toString() })
+  );
+  deletePositions.run();
+});
+
+const updateTrades = db.transaction(trades => {
+  clearTrades.run();
+  trades.forEach(
+    ({ who, account, ticker, seq, date, cost, qty, gain, notes }) =>
+      insertTrade.run({
+        who,
+        account,
+        ticker,
+        seq,
+        date,
+        cost: cost ? cost.toString() : null,
+        qty: qty ? qty.toString() : null,
+        gain: gain ? gain.toString() : null,
+        notes: notes || null
+      })
+  );
+  deleteTrades.run();
+});
+
+const updatePrices = db.transaction(prices => {
+  clearPrices.run();
+  prices.forEach(({ ticker, name, price, priceSource, priceUpdated }) => {
+    updateStockName.run({ ticker, name });
+    updatePrice.run({
+      ticker,
+      price: price.toString(),
+      priceSource,
+      priceUpdated
+    });
+  });
+});
 
 function once (fn) {
   function f (...args) {
@@ -720,7 +960,7 @@ async function importStocks (opts) {
     .map(validAttribs)
     .map(makeObject);
 
-  await put('/stock', data, opts);
+  updateStockDetails(data);
 
   debug$7('Loaded %d records from stocks', data.length);
 }
@@ -794,36 +1034,18 @@ const ACCOUNT_COLUMN = 0; // column A
 const ACCOUNT_LIST =
   'AJL,ISA;RSGG,ISA;AJL,Dealing;RSGG,Dealing;AJL,SIPP;RSGG,SIPP;RSGG,SIPP2';
 const DIV_COLUMN = 26; // column AA
+const accts = ACCOUNT_LIST.split(';')
+  .map(code => code.split(','))
+  .map(([who, account]) => ({ who, account }));
 
-async function importPortfolio (opts) {
+async function importPortfolio () {
   const rangeData = await getSheetData(SOURCE.name, SOURCE.range);
 
-  await updateDividends(rangeData, opts);
-  await updatePositions(rangeData, opts);
+  await importDividends(rangeData);
+  await importPositions(rangeData);
 }
 
-async function updateDividends (rangeData, opts) {
-  const stocks = await get$1('/stock', opts);
-  const tickers = new Set(stocks.map(s => s.ticker));
-  const updates = [];
-  for (const item of getDividendData(rangeData)) {
-    updates.push(item);
-    tickers.delete(item.ticker);
-  }
-  const changed = updates.length;
-  for (const ticker of tickers) {
-    updates.push({ ticker, dividend: undefined });
-  }
-  debug$6(
-    'Updated %d and cleared %d dividends from portfolio sheet',
-    changed,
-    tickers.size
-  );
-
-  await put('/stock', updates, opts);
-}
-
-function getDividendData (rangeData) {
+async function importDividends (rangeData) {
   const extractData = row => [row[TICKER_COLUMN], row[DIV_COLUMN]];
   const validTicker = ([ticker]) => !!ticker;
   const makeObj = ([ticker, dividend]) => ({
@@ -831,63 +1053,36 @@ function getDividendData (rangeData) {
     dividend: importDecimal(dividend)
   });
 
-  return rangeData
+  const data = rangeData
     .map(extractData)
     .filter(validTicker)
-    .map(makeObj)
+    .map(makeObj);
+
+  updateDividends(data);
+  debug$6('Updated %d dividends', data.length);
 }
 
-async function updatePositions (rangeData, opts) {
-  const positions = await get$1('/position', opts);
-  const key = p => `${p.who}:${p.account}:${p.ticker}`;
-  const old = new Map(positions.map(p => [key(p), p]));
-  const updates = [];
-  for (const item of getPositionData(rangeData)) {
-    updates.push(item);
-    old.delete(key(item));
-  }
-  const deletes = [...old.values()];
-
-  if (updates.length) {
-    await put('/position', updates, opts);
-    debug$6('%d positions updated', updates.length);
-  }
-  if (deletes.length) {
-    await del('/position', deletes, opts);
-    debug$6('%d position(s) deleted', deletes.length);
-  }
-}
-
-function * getPositionData (rangeData) {
-  const accts = ACCOUNT_LIST.split(';')
-    .map(code => code.split(','))
-    .map(([who, account]) => ({ who, account }));
-
+async function importPositions (rangeData, opts) {
   const extractRow = row => [
     row[TICKER_COLUMN],
     accts,
     row.slice(ACCOUNT_COLUMN, ACCOUNT_COLUMN + accts.length)
   ];
   const validRow = ([ticker]) => !!ticker;
+  const expandPositons = ([ticker, accts, qtys]) =>
+    qtys.map((qty, i) => ({ ...accts[i], ticker, qty: importDecimal(qty, 0) }));
+  const validPos = p => !!p.qty;
 
-  const rows = rangeData.map(extractRow).filter(validRow);
+  const updates = rangeData
+    .map(extractRow)
+    .filter(validRow)
+    .map(expandPositons)
+    .flat(1)
+    .filter(validPos);
 
-  for (const [ticker, accts, qtys] of rows) {
-    yield * getPositionsFromRow(ticker, accts, qtys);
-  }
-}
+  updatePositions(updates);
 
-function * getPositionsFromRow (ticker, accts, qtys) {
-  const makePos = (qty, i) => ({
-    ticker,
-    ...accts[i],
-    qty: importDecimal(qty, 0)
-  });
-  const validPos = x => !!x.qty;
-
-  const positions = qtys.map(makePos).filter(validPos);
-
-  yield * positions;
+  debug$6('%d positions updated', updates.length);
 }
 
 function sortBy (name, desc) {
@@ -918,11 +1113,8 @@ const source = {
   range: 'Trades!A2:F'
 };
 
-async function importTrades (opts) {
+async function importTrades () {
   const rangeData = await getSheetData(source.name, source.range);
-  const key = t => `${t.who}:${t.account}:${t.ticker}:${t.seq}`;
-  const trades = await get$1('/trade', opts);
-  const old = new Map(trades.map(t => [key(t), t]));
 
   const updates = [];
   const groups = getTradeGroups(rangeData);
@@ -933,18 +1125,11 @@ async function importTrades (opts) {
     for (const trade of group) {
       trade.seq = ++seq;
       updates.push(trade);
-      old.delete(key(trade));
     }
   }
 
-  await put('/trade', updates, opts);
+  updateTrades(updates);
   debug$5('Updated %d positions with %d trades', groups.length, updates.length);
-
-  if (old.size) {
-    const deletes = [...old.values()];
-    await del('/trade', deletes, opts);
-    debug$5('Removed %d old trades', deletes.length);
-  }
 }
 
 function getTradeGroups (rows) {
@@ -979,12 +1164,12 @@ function readTrades (rows) {
 }
 
 function sortTrades (trades) {
-  const sortFn = sortBy('who')
-    .thenBy('account')
-    .thenBy('ticker')
-    .thenBy('date');
-
-  return trades.sort(sortFn)
+  return trades.sort(
+    sortBy('who')
+      .thenBy('account')
+      .thenBy('ticker')
+      .thenBy('date')
+  )
 }
 
 function groupTrades (trades) {
@@ -1279,7 +1464,7 @@ function getTZString (d) {
 
 function get (url) {
   return new Promise((resolve, reject) => {
-    const req = get$2(url, { headers: { 'User-Agent': USER_AGENT } }, res => {
+    const req = get$1(url, { headers: { 'User-Agent': USER_AGENT } }, res => {
       const { statusCode } = res;
       if (statusCode >= 400) {
         const { statusMessage, headers } = res;
@@ -1424,34 +1609,14 @@ const attempts = [
   ['closed-end-investments', fetchSector]
 ];
 
-async function fetchPrices (opts) {
-  const activeStocks = await get$1('/stock/active', opts);
-  const allStocks = await get$1('/stock', opts);
-
-  const needed = new Set(activeStocks.map(s => s.ticker));
-  const notNeeded = new Set(
-    allStocks.map(s => s.ticker).filter(t => !needed.has(t))
-  );
-
+async function fetchPrices () {
+  const needed = new Set(activeStockTickers());
   const updates = [];
   for await (const item of getPrices(needed)) {
-    const stock = activeStocks.find(s => s.ticker === item.ticker);
-    updates.push({
-      ...item,
-      name: stock.name || item.name
-    });
+    updates.push(item);
   }
 
-  for (const ticker of notNeeded) {
-    updates.push({
-      ticker,
-      price: undefined,
-      priceSource: undefined,
-      priceUpdated: undefined
-    });
-  }
-
-  await put('/stock', updates, opts);
+  updatePrices(updates);
 }
 
 async function * getPrices (tickers) {
@@ -1510,66 +1675,33 @@ const positions = { name: 'Positions', range: 'Positions!A2:I' };
 const timestamp = { name: 'Positions', range: 'Positions!K1' };
 
 async function exportPositions (opts) {
-  const data = await getPositionsSheet(opts);
-
+  const data = getPositions().map(makePositionRow);
   await overwriteSheetData(positions.name, positions.range, data);
   await putSheetData(timestamp.name, timestamp.range, [[new Date()]]);
-
   debug$2('position sheet updated');
 }
 
-async function getPositionsSheet (opts) {
-  const sortFn = sortBy('ticker')
-    .thenBy('who')
-    .thenBy('account');
-
-  const positions = await get$1('/position', opts);
-  const stocks = await get$1('/stock', opts);
-
-  return positions
-    .filter(pos => pos.qty && pos.qty.cmp(0n) > 0)
-    .sort(sortFn)
-    .map(addStock(stocks))
-    .map(addDerived)
-    .map(makePositionRow)
-}
-
-function addStock (stocks) {
-  return position => ({
-    position,
-    stock: stocks.find(stock => stock.ticker === position.ticker)
-  })
-}
-
-function addDerived (data) {
-  const { position: p, stock: s } = data;
-  if (s.price && s.dividend) {
-    data.yield = s.dividend
-      .withPrecision(6)
-      .div(s.price)
-      .withPrecision(3);
-  }
-  if (p.qty && s.price) {
-    data.value = s.price.mul(p.qty).withPrecision(2);
-  }
-  if (p.qty && s.dividend) {
-    data.income = s.dividend.mul(p.qty).withPrecision(2);
-  }
-  return data
-}
-
-function makePositionRow (data) {
-  const { position: p, stock: s } = data;
+function makePositionRow ({
+  ticker,
+  who,
+  account,
+  qty,
+  price,
+  dividend,
+  yield: _yield,
+  value,
+  income
+}) {
   return [
-    p.ticker,
-    p.who,
-    p.account,
-    exportDecimal(p.qty),
-    exportDecimal(s.price),
-    exportDecimal(s.dividend),
-    exportDecimal(data.yield),
-    exportDecimal(data.value),
-    exportDecimal(data.income)
+    ticker,
+    who,
+    account,
+    exportDecimal(qty),
+    exportDecimal(price),
+    exportDecimal(dividend),
+    exportDecimal(_yield),
+    exportDecimal(value),
+    exportDecimal(income)
   ]
 }
 
@@ -1581,21 +1713,10 @@ const debug$1 = log
 const trades = { name: 'Positions', range: 'Trades!A2:G' };
 
 async function exportTrades (opts) {
-  const data = await getTradesSheet(opts);
+  const data = getTrades().map(makeTradeRow);
 
   await overwriteSheetData(trades.name, trades.range, data);
   debug$1('trades sheet updated');
-}
-
-async function getTradesSheet (opts) {
-  const sortFn = sortBy('who')
-    .thenBy('account')
-    .thenBy('ticker')
-    .thenBy('seq');
-
-  const trades = await get$1('/trade', opts);
-
-  return trades.sort(sortFn).map(makeTradeRow)
 }
 
 function makeTradeRow (t) {
@@ -1817,10 +1938,8 @@ const debug = log
 const STOCKS_URI = 'gs://finance-readersludlow/stocks.csv';
 const TEMPFILE = '/tmp/stocks.csv';
 
-async function exportStocks (opts) {
-  const stocks = await get$1('/stock', opts);
-  const data = stocks
-    .sort(sortBy('ticker'))
+async function exportStocks () {
+  const data = getStocks()
     .map(stockToRow)
     .map(makeCSV)
     .join('');
@@ -1848,19 +1967,19 @@ async function main (opts) {
   while (cmds.length) {
     const cmd = cmds.shift();
     if (cmd === 'import-stocks') {
-      await importStocks(opts).catch(bail);
+      await importStocks().catch(bail);
     } else if (cmd === 'import-portfolio') {
-      await importPortfolio(opts).catch(bail);
+      await importPortfolio().catch(bail);
     } else if (cmd === 'import-trades') {
-      await importTrades(opts).catch(bail);
+      await importTrades().catch(bail);
     } else if (cmd === 'fetch-prices') {
-      await fetchPrices(opts).catch(bail);
+      await fetchPrices().catch(bail);
     } else if (cmd === 'export-positions') {
-      await exportPositions(opts).catch(bail);
+      await exportPositions().catch(bail);
     } else if (cmd === 'export-trades') {
-      await exportTrades(opts).catch(bail);
+      await exportTrades().catch(bail);
     } else if (cmd === 'export-stocks') {
-      await exportStocks(opts).catch(bail);
+      await exportStocks().catch(bail);
     } else if (cmd === 'import') {
       cmds.unshift('import-stocks', 'import-portfolio', 'import-trades');
     } else if (cmd === 'fetch') {
@@ -1879,15 +1998,11 @@ function bail (err) {
   process.exit(2);
 }
 
-const version = '1.0.1';
+const version = '1.1.0';
 const opts = mri(process.argv.slice(2), {
   alias: {
-    port: 'p',
     help: 'h',
     version: 'v'
-  },
-  default: {
-    port: 39705
   }
 });
 if (opts.version) {
@@ -1910,8 +2025,7 @@ if (opts.version) {
       '\n' +
       '  Options\n' +
       '    -v, --version     Display current version\n' +
-      '    -h, --help        Displays this message\n' +
-      '    -p, --port        Sets the port (default: 39705)\n'
+      '    -h, --help        Displays this message\n'
   );
 } else {
   main(opts);
