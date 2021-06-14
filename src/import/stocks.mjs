@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { put } from '../db.mjs'
+import { updateStockDetails } from '../db.mjs'
 import { getSheetData } from '../sheets.mjs'
 
 const debug = log
@@ -28,7 +28,7 @@ export default async function importStocks (opts) {
     .map(validAttribs)
     .map(makeObject)
 
-  await put('/stock', data, opts)
+  updateStockDetails(data)
 
   debug('Loaded %d records from stocks', data.length)
 }

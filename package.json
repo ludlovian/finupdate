@@ -29,6 +29,7 @@
     "@google-cloud/storage": "^5.8.5",
     "@googleapis/drive": "^0.3.1",
     "@googleapis/sheets": "^0.3.0",
+    "better-sqlite3": "^7.4.1",
     "mime": "^2.5.2"
   }
 }

@@ -11,9 +11,9 @@ export default async function main (opts) {
   while (cmds.length) {
     const cmd = cmds.shift()
     if (cmd === 'import-stocks') {
-      await importStocks(opts).catch(bail)
+      await importStocks().catch(bail)
     } else if (cmd === 'import-portfolio') {
-      await importPortfolio(opts).catch(bail)
+      await importPortfolio().catch(bail)
     } else if (cmd === 'import-trades') {
       await importTrades(opts).catch(bail)
     } else if (cmd === 'fetch-prices') {

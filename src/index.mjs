@@ -4,12 +4,8 @@ import main from './main.mjs'
 const version = '__VERSION__'
 const opts = mri(process.argv.slice(2), {
   alias: {
-    port: 'p',
     help: 'h',
     version: 'v'
-  },
-  default: {
-    port: 39705
   }
 })
 if (opts.version) {
@@ -32,8 +28,7 @@ if (opts.version) {
       '\n' +
       '  Options\n' +
       '    -v, --version     Display current version\n' +
-      '    -h, --help        Displays this message\n' +
-      '    -p, --port        Sets the port (default: 39705)\n'
+      '    -h, --help        Displays this message\n'
   )
 } else {
   main(opts)

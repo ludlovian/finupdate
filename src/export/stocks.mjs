@@ -1,10 +1,9 @@
 import { unlink, writeFile } from 'fs/promises'
 
 import log from 'logjs'
-import sortBy from 'sortby'
 import { upload } from 'googlejs/storage'
 
-import { get } from '../db.mjs'
+import { getStocks } from '../db.mjs'
 import { exportDecimal, makeCSV } from './util.mjs'
 
 const debug = log
@@ -15,10 +14,8 @@ const debug = log
 const STOCKS_URI = 'gs://finance-readersludlow/stocks.csv'
 const TEMPFILE = '/tmp/stocks.csv'
 
-export default async function exportStocks (opts) {
-  const stocks = await get('/stock', opts)
-  const data = stocks
-    .sort(sortBy('ticker'))
+export default async function exportStocks () {
+  const data = getStocks()
     .map(stockToRow)
     .map(makeCSV)
     .join('')

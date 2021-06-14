@@ -6,6 +6,7 @@ export default {
   external: [
     'fs/promises',
     'stream/promises',
+    'better-sqlite3',
     'mime/lite.js',
     '@googleapis/sheets',
     '@googleapis/drive',

@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { get, put } from '../db.mjs'
+import { activeStockTickers, updatePrices } from '../db.mjs'
 import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
 
 const debug = log
@@ -15,34 +15,14 @@ const attempts = [
   ['closed-end-investments', fetchSector]
 ]
 
-export default async function fetchPrices (opts) {
-  const activeStocks = await get('/stock/active', opts)
-  const allStocks = await get('/stock', opts)
-
-  const needed = new Set(activeStocks.map(s => s.ticker))
-  const notNeeded = new Set(
-    allStocks.map(s => s.ticker).filter(t => !needed.has(t))
-  )
-
+export default async function fetchPrices () {
+  const needed = new Set(activeStockTickers())
   const updates = []
   for await (const item of getPrices(needed)) {
-    const stock = activeStocks.find(s => s.ticker === item.ticker)
-    updates.push({
-      ...item,
-      name: stock.name || item.name
-    })
+    updates.push(item)
   }
 
-  for (const ticker of notNeeded) {
-    updates.push({
-      ticker,
-      price: undefined,
-      priceSource: undefined,
-      priceUpdated: undefined
-    })
-  }
-
-  await put('/stock', updates, opts)
+  updatePrices(updates)
 }
 
 async function * getPrices (tickers) {
