@@ -36,8 +36,10 @@ async function * fetchCollection (url, collClass, priceSource) {
   const addItem = data => {
     const { name, ticker } = extractNameAndTicker(data[0])
     const price = extractPriceInPence(data[1])
-    items.push({ ticker, name, price, priceUpdated, priceSource })
-    count++
+    if (price) {
+      items.push({ ticker, name, price, priceUpdated, priceSource })
+      count++
+    }
   }
 
   let row
@@ -98,7 +100,11 @@ export async function fetchPrice (ticker) {
     scrapie.write(chunk)
   }
 
-  debug('fetched %s from lse:share', ticker)
+  if (!item.price) {
+    console.error('failed to fetch price from lse:share for %s', ticker)
+  } else {
+    debug('fetched %s from lse:share', ticker)
+  }
 
   return item
 }

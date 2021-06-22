@@ -19,7 +19,7 @@ export default async function fetchPrices () {
   const needed = new Set(activeStockTickers())
   const updates = []
   for await (const item of getPrices(needed)) {
-    updates.push(item)
+    if (item.price) updates.push(item)
   }
 
   updatePrices(updates)
