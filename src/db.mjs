@@ -1,249 +1,72 @@
 import { homedir } from 'os'
-import { resolve } from 'path'
-
+import { resolve, join } from 'path'
 import SQLite from 'better-sqlite3'
-
 import decimal from 'decimal'
+import { sql, ddl } from './sql.mjs'
 
-const DB_NAME = 'findb.sqlite'
+const DB_NAME = process.env.DB_NAME || 'findb.sqlite'
+const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases')
 
-const t = s =>
-  s[0]
-    .split(/\n/)
-    .map(s => s.trim())
-    .join(' ')
+const db = new SQLite(join(DB_DIR, DB_NAME))
 
-const maybeDecimal = x => (x ? decimal(x) : undefined)
+db.pragma('journal_mode = WAL')
+db.exec(tidy(ddl))
+for (const k in sql) sql[k] = db.prepare(tidy(sql[k]))
 
-const db = new SQLite(resolve(homedir(), '.databases', DB_NAME))
-db.pragma('journal_mode=WAL')
-db.exec(t`
-  CREATE TABLE IF NOT EXISTS stock(
-    ticker TEXT PRIMARY KEY,
-    name TEXT,
-    incomeType TEXT,
-    notes TEXT,
-    dividend TEXT,
-    price TEXT,
-    priceSource TEXT,
-    priceUpdated TEXT
-  );
-  CREATE TABLE IF NOT EXISTS position(
-    who TEXT,
-    account TEXT,
-    ticker TEXT,
-    qty TEXT,
-    PRIMARY KEY (who, account, ticker)
-  );
-  CREATE TABLE IF NOT EXISTS trade(
-    who TEXT,
-    account TEXT,
-    ticker TEXT,
-    seq INTEGER,
-    date TEXT,
-    cost TEXT,
-    qty TEXT,
-    gain TEXT,
-    notes TEXT,
-    PRIMARY KEY (who, account, ticker, seq)
-  );
-`)
+export function activeStockTickers () {
+  return sql.selectActiveTickers.pluck().all()
+}
 
-const insertStock = db.prepare(t`
-  INSERT INTO stock (
-      ticker,
-      name,
-      incomeType,
-      notes
-    )
-    VALUES (
-      $ticker,
-      $name,
-      $incomeType,
-      $notes
-    )
-    ON CONFLICT DO
-    UPDATE SET
-      name = excluded.name,
-      incomeType = excluded.incomeType,
-      notes = excluded.notes
-`)
-
-const clearDividends = db.prepare(t`
-  UPDATE stock
-  SET dividend = NULL
-`)
-
-const insertDividend = db.prepare(t`
-  INSERT INTO stock (ticker, dividend)
-    VALUES ($ticker, $dividend)
-    ON CONFLICT DO UPDATE
-    SET dividend = excluded.dividend
-`)
-
-const clearPositions = db.prepare(t`
-  UPDATE position
-  SET qty = NULL
-`)
-
-const insertPosition = db.prepare(t`
-  INSERT INTO position (who, account, ticker, qty)
-    VALUES ($who, $account, $ticker, $qty)
-    ON CONFLICT DO UPDATE
-    SET qty = excluded.qty
-`)
-
-const deletePositions = db.prepare(t`
-  DELETE FROM position
-  WHERE qty IS NULL
-`)
-
-const clearTrades = db.prepare(t`
-  UPDATE trade
-    SET qty = NULL,
-        cost = NULL
-`)
-
-const insertTrade = db.prepare(t`
-  INSERT INTO trade (who, account, ticker, seq, date, qty, cost, gain, notes)
-    VALUES ($who, $account, $ticker, $seq, $date, $qty, $cost, $gain, $notes)
-  ON CONFLICT DO UPDATE
-    SET date = excluded.date,
-        qty = excluded.qty,
-        cost = excluded.cost,
-        gain = excluded.gain,
-        notes = excluded.notes
-`)
-
-const deleteTrades = db.prepare(t`
-  DELETE FROM trade
-  WHERE qty IS NULL
-  AND   cost IS NULL
-`)
-
-const updateStockName = db.prepare(t`
-  UPDATE stock
-  SET   name = $name
-  WHERE ticker = $ticker
-    AND name IS NULL
-`)
-
-const clearPrices = db.prepare(t`
-  UPDATE stock
-  SET   price = NULL,
-        priceSource = NULL,
-        priceUpdated = NULL
-`)
-
-const updatePrice = db.prepare(t`
-  UPDATE stock
-  SET   price = $price,
-        priceSource = $priceSource,
-        priceUpdated = $priceUpdated
-  WHERE ticker = $ticker
-`)
-
-const selectActiveTickers = db.prepare(t`
-  SELECT ticker
-    FROM stock
-   WHERE dividend IS NOT NULL
-  UNION
-  SELECT ticker
-    FROM position
-`)
-
-const selectPositions = db.prepare(t`
-  SELECT p.ticker as ticker,
-      who,
-      account,
-      qty,
-      price,
-      dividend
-  FROM  position p
-  INNER JOIN stock s
-  WHERE p.ticker = s.ticker
-  ORDER BY ticker, who, account
-`)
-
-const selectTrades = db.prepare(t`
-  SELECT who,
-        account,
-        ticker,
-        seq,
-        date,
-        qty,
-        cost,
-        gain
-  FROM trade
-  ORDER BY who, account, ticker, seq
-`)
-
-const selectStocks = db.prepare(t`
-  SELECT ticker,
-        incomeType,
-        name,
-        price,
-        dividend,
-        notes
-  FROM stock
-  ORDER BY ticker
-`)
-
-export const activeStockTickers = () => selectActiveTickers.pluck().all()
-
-export const getPositions = () =>
-  selectPositions
-    .all()
-    .map(({ ticker, who, account, qty, price, dividend }) => {
-      let _yield
-      let value
-      let income
-      qty = maybeDecimal(qty)
-      price = maybeDecimal(price)
-      dividend = maybeDecimal(dividend)
-      if (price && dividend) {
-        _yield = dividend
-          .withPrecision(9)
-          .div(price)
-          .withPrecision(3)
-      }
-      if (qty && price) {
-        value = price.mul(qty).withPrecision(2)
-      }
-      if (qty && dividend) {
-        income = dividend.mul(qty).withPrecision(2)
-      }
-      return {
-        ticker,
-        who,
-        account,
-        qty,
-        price,
-        dividend,
-        yield: _yield,
-        value,
-        income
-      }
+export function getStocks () {
+  return sql.selectStocks.all().map(row =>
+    adjust(row, {
+      price: maybeDecimal,
+      dividend: maybeDecimal
     })
+  )
+}
 
-export const getTrades = () =>
-  selectTrades.all().map(row => {
-    row.qty = maybeDecimal(row.qty)
-    row.cost = maybeDecimal(row.cost)
-    row.gain = maybeDecimal(row.gain)
-    return row
+export function getPositions () {
+  return sql.selectPositions.all().map(row => {
+    row = adjust(row, {
+      qty: maybeDecimal,
+      price: maybeDecimal,
+      dividend: maybeDecimal
+    })
+    return calcDerived(row)
   })
+}
 
-export const getStocks = () =>
-  selectStocks.all().map(row => ({
-    ...row,
-    price: maybeDecimal(row.price),
-    dividend: maybeDecimal(row.dividend)
-  }))
+function calcDerived (row) {
+  const { qty, price, dividend } = row
+  if (price && dividend) {
+    row.yield = dividend
+      .withPrecision(9)
+      .div(price)
+      .withPrecision(3)
+  }
+  if (qty && price) {
+    row.value = price.mul(qty).withPrecision(2)
+  }
+  if (qty && dividend) {
+    row.income = dividend.mul(qty).withPrecision(2)
+  }
+  return row
+}
+
+export function getTrades () {
+  return sql.selectTrades.all().map(row =>
+    adjust(row, {
+      qty: maybeDecimal,
+      cost: maybeDecimal,
+      gain: maybeDecimal
+    })
+  )
+}
 
 export const updateStockDetails = db.transaction(stocks =>
   stocks.forEach(({ ticker, name, incomeType, notes }) =>
-    insertStock.run({
+    sql.insertStock.run({
       ticker,
       name: name || null,
       incomeType: incomeType || null,
@@ -253,25 +76,25 @@ export const updateStockDetails = db.transaction(stocks =>
 )
 
 export const updateDividends = db.transaction(divis => {
-  clearDividends.run()
+  sql.clearAllDividends.run()
   divis.forEach(({ ticker, dividend }) =>
-    insertDividend.run({ ticker, dividend: dividend.toString() })
+    sql.insertDividend.run({ ticker, dividend: dividend.toString() })
   )
 })
 
 export const updatePositions = db.transaction(positions => {
-  clearPositions.run()
+  sql.clearAllPositions.run()
   positions.forEach(({ who, account, ticker, qty }) =>
-    insertPosition.run({ who, account, ticker, qty: qty.toString() })
+    sql.insertPosition.run({ who, account, ticker, qty: qty.toString() })
   )
-  deletePositions.run()
+  sql.deleteOldPositions.run()
 })
 
 export const updateTrades = db.transaction(trades => {
-  clearTrades.run()
+  sql.clearAllTrades.run()
   trades.forEach(
     ({ who, account, ticker, seq, date, cost, qty, gain, notes }) =>
-      insertTrade.run({
+      sql.insertTrade.run({
         who,
         account,
         ticker,
@@ -283,14 +106,14 @@ export const updateTrades = db.transaction(trades => {
         notes: notes || null
       })
   )
-  deleteTrades.run()
+  sql.deleteOldTrades.run()
 })
 
 export const updatePrices = db.transaction(prices => {
-  clearPrices.run()
+  sql.clearAllPrices.run()
   prices.forEach(({ ticker, name, price, priceSource, priceUpdated }) => {
-    updateStockName.run({ ticker, name })
-    updatePrice.run({
+    sql.updateStockName.run({ ticker, name })
+    sql.updatePrice.run({
       ticker,
       price: price.toString(),
       priceSource,
@@ -298,3 +121,22 @@ export const updatePrices = db.transaction(prices => {
     })
   })
 })
+
+function adjust (obj, fns) {
+  const ret = { ...obj }
+  for (const k in fns) {
+    ret[k] = fns[k].call(ret, ret[k])
+  }
+  return ret
+}
+
+function tidy (sql) {
+  return sql
+    .split('\n')
+    .map(s => s.trim())
+    .join(' ')
+}
+
+function maybeDecimal (x) {
+  return x ? decimal(x) : undefined
+}
