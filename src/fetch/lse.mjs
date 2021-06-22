@@ -69,7 +69,7 @@ export async function fetchPrice (ticker) {
 
   const url = [
     'https://www.lse.co.uk/SharePrice.asp',
-    `?shareprice=${ticker.padEnd('.', 3)}`
+    `?shareprice=${ticker.padEnd(3, '.')}`
   ].join('')
 
   const item = {
