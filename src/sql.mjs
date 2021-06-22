@@ -115,6 +115,11 @@ sql.clearAllPrices = `
     SET price        = NULL,
         priceSource  = NULL,
         priceUpdated = NULL
+    WHERE dividend IS NULL
+      OR ticker NOT IN (
+        SELECT ticker
+        FROM   position
+      )
 `
 
 sql.updatePrice = `
