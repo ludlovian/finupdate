@@ -532,6 +532,11 @@ sql.clearAllPrices = `
     SET price        = NULL,
         priceSource  = NULL,
         priceUpdated = NULL
+    WHERE dividend IS NULL
+      OR ticker NOT IN (
+        SELECT ticker
+        FROM   position
+      )
 `;
 
 sql.updatePrice = `
@@ -2002,7 +2007,7 @@ function bail (err) {
   process.exit(2);
 }
 
-const version = '1.1.1';
+const version = '1.1.2';
 const opts = mri(process.argv.slice(2), {
   alias: {
     help: 'h',
