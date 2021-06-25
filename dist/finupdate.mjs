@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { format } from 'util';
 import { homedir } from 'os';
-import { resolve, join, extname } from 'path';
+import { join, extname } from 'path';
 import SQLite from 'better-sqlite3';
+import { format } from 'util';
 import { get as get$1 } from 'https';
 import { stat, writeFile, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
@@ -128,6 +128,205 @@ function mri (args, opts) {
 	}
 
 	return out;
+}
+
+let db;
+
+const SQL = {
+  from: sql => statement(tidy(sql)),
+  attach: _db => (db = _db),
+  transaction: fn => transaction(fn)
+};
+
+function statement (sql) {
+  if (!Array.isArray(sql)) sql = sql.split(';');
+
+  const s = {
+    run: (...args) => exec('run', ...args),
+    get: (...args) => exec('get', ...args),
+    all: (...args) => exec('all', ...args),
+    pluck: () => Object.assign(statement(sql), { _pluck: true }),
+    raw: () => Object.assign(statement(sql), { _raw: true })
+  };
+
+  return s
+
+  function exec (cmd, ...args) {
+    const stmts = [...sql];
+    let last = stmts.pop();
+    for (const stmt of stmts) prepare(stmt).run(...args);
+    last = prepare(last);
+    if (s._pluck) last = last.pluck();
+    if (s._raw) last = last.raw();
+    return last[cmd](...args)
+  }
+}
+
+const cache = new Map();
+function prepare (sql) {
+  if (!cache.has(sql)) cache.set(sql, db.prepare(sql));
+  return cache.get(sql)
+}
+
+function transaction (_fn) {
+  let fn;
+  return (...args) => {
+    if (!fn) fn = db.transaction(_fn);
+    return fn(...args)
+  }
+}
+
+function tidyStatement (statement) {
+  return statement
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => !line.startsWith('--'))
+    .map(line => line.replaceAll(/  +/g, ' '))
+    .join(' ')
+    .trim()
+}
+
+function tidy (statements) {
+  return statements
+    .split(';')
+    .map(tidyStatement)
+    .filter(Boolean)
+    .join(';')
+}
+
+const clearOldDividends=SQL.from("DELETE FROM stock_dividend WHERE updated < datetime('now', '-' || ? || ' days')");
+const clearOldPrices=SQL.from("DELETE FROM stock_price WHERE updated < datetime('now', '-' || ? || ' days')");
+const clearPositions=SQL.from("UPDATE position SET qty = 0, qtyFactor = 1, source = NULL, updated = datetime('now') WHERE qty != 0");
+const clearTrades=SQL.from("UPDATE trade SET qty = NULL, cost = NULL, gain = NULL WHERE positionId IN ( SELECT positionId FROM position WHERE accountId IN ( SELECT accountId FROM account WHERE name = ? ) )");
+const ddl=SQL.from("PRAGMA journal_mode = WAL;PRAGMA user_version = 2;PRAGMA foreign_keys = TRUE;CREATE TABLE IF NOT EXISTS stock( stockId INTEGER PRIMARY KEY, ticker TEXT NOT NULL UNIQUE, name TEXT, incomeType TEXT, notes TEXT, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS stock_dividend( stockId INTEGER PRIMARY KEY REFERENCES stock(stockId), dividend INTEGER NOT NULL, dividendFactor INTEGER NOT NULL DEFAULT 1, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS stock_price( stockId INTEGER PRIMARY KEY REFERENCES stock(stockId), price INTEGER NOT NULL, priceFactor INTEGER NOT NULL, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS account( accountId INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE );INSERT OR IGNORE INTO account (name) VALUES ('Dealing'), ('ISA'), ('SIPP'), ('SIPP2');CREATE TABLE IF NOT EXISTS person( personId INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE );INSERT OR IGNORE INTO person (name) VALUES ('AJL'), ('RSGG');CREATE TABLE IF NOT EXISTS position( positionId INTEGER PRIMARY KEY, personId INTEGER NOT NULL REFERENCES person(personId), accountId INTEGER NOT NULL REFERENCES account(accountId), stockId INTEGER NOT NULL REFERENCES stock(stockId), qty INTEGER NOT NULL, qtyFactor INTEGER NOT NULL DEFAULT 1, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (personId, accountId, stockId) );CREATE TABLE IF NOT EXISTS trade( tradeId INTEGER PRIMARY KEY, positionId INTEGER NOT NULL REFERENCES position(positionId), seq INTEGER NOT NULL, date TEXT NOT NULL, qty INTEGER, qtyFactor INTEGER, cost INTEGER, costFactor INTEGER, gain INTEGER, gainFactor INTEGER, notes TEXT, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (positionId, seq) );CREATE VIEW IF NOT EXISTS stock_view AS SELECT s.stockId AS stockId, s.ticker AS ticker, s.name AS name, s.incomeType AS incomeType, s.notes AS notes, CAST (d.dividend AS REAL) / CAST (d.dividendFactor AS REAL) AS dividend, CAST (p.price AS REAL) / CAST (p.priceFactor AS REAL) AS price, CAST (d.dividend * p.priceFactor AS REAL) / CAST (p.price * d.dividendFactor AS REAL) AS yield FROM stock s LEFT JOIN stock_dividend d USING (stockId) LEFT JOIN stock_price p USING (stockId) ORDER BY ticker;CREATE VIEW IF NOT EXISTS position_view AS SELECT p.positionId AS positionId, s.ticker AS ticker, a.name AS account, w.name AS person, CAST (p.qty AS REAL) / CAST (p.qtyFactor AS REAL) AS qty, round(p.qty * s.price, 2) AS value, round(p.qty * s.dividend, 2) AS income FROM position p INNER JOIN stock_view s USING (stockId) INNER JOIN account a USING (accountId) INNER JOIN person w USING (personId) WHERE qty != 0 ORDER BY ticker, account, person;CREATE VIEW IF NOT EXISTS trade_view AS SELECT t.tradeId AS tradeId, s.ticker AS ticker, a.name AS account, w.name AS person, t.date AS date, CAST (t.qty AS REAL) / CAST (t.qtyFactor AS REAL) AS qty, round(CAST (t.cost AS REAL) / CAST (t.costFactor AS REAL), 2) AS cost, round(CAST (t.gain AS REAL) / CAST (t.gainFactor AS REAL), 2) AS gain, t.notes AS notes FROM trade t, position p, account a, person w, stock s WHERE t.positionId = p.positionId AND p.accountId = a.accountId AND p.personId = w.personId AND p.stockId = s.stockId ORDER BY ticker, account, person, t.seq");
+const deleteTrades=SQL.from("DELETE FROM trade WHERE qty IS NULL AND cost IS NULL AND gain IS NULL");
+const insertDividend=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT INTO stock_dividend ( stockId, dividend, dividendFactor, source ) SELECT stockId, $dividend, $dividendFactor, $source FROM stock WHERE ticker = $ticker AND $dividend IS NOT NULL ON CONFLICT DO UPDATE SET dividend = excluded.dividend, dividendFactor = excluded.dividendFactor, source = excluded.source;DELETE FROM stock_dividend WHERE stockId IN ( SELECT stockId FROM stock WHERE ticker = $ticker) AND $dividend IS NULL");
+const insertPosition=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT OR IGNORE INTO person (name) VALUES ($person);INSERT OR IGNORE INTO account (name) VALUES ($account);INSERT INTO position ( personId, accountId, stockId, qty, qtyFactor, source ) SELECT p.personId, a.accountId, s.stockId, $qty, $qtyFactor, $source FROM person p, account a, stock s WHERE p.name = $person AND a.name = $account AND s.ticker = $ticker  ON CONFLICT DO UPDATE SET qty = excluded.qty, qtyFactor = excluded.qtyFactor, source = excluded.source, updated = excluded.updated");
+const insertPrice=SQL.from("INSERT OR IGNORE INTO stock(ticker) VALUES ($ticker);UPDATE stock SET name = $name WHERE ticker = $ticker AND name IS NULL;INSERT INTO stock_price ( stockId, price, priceFactor, source ) SELECT stockId, $price, $priceFactor, $source FROM stock WHERE ticker = $ticker ON CONFLICT DO UPDATE SET price = excluded.price, priceFactor = excluded.priceFactor, source = excluded.source");
+const insertStock=SQL.from("INSERT INTO stock (ticker, name, incomeType, notes, source) VALUES ($ticker, $name, $incomeType, $notes, $source) ON CONFLICT DO UPDATE SET name = excluded.name, incomeType = excluded.incomeType, notes = excluded.notes, source = excluded.source, updated = excluded.updated");
+const insertTrade=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT OR IGNORE INTO person (name) VALUES ($person);INSERT OR IGNORE INTO account (name) VALUES ($account);INSERT OR IGNORE INTO position ( personId, accountId, stockId, qty, qtyFactor ) SELECT w.personId, a.accountId, s.stockId, 0, 1 FROM person w, account a, stock s WHERE w.name = $person AND a.name = $account AND s.ticker = $ticker;INSERT INTO trade ( positionId, seq, date, qty, qtyFactor, cost, costFactor, gain, gainFactor, notes, source ) SELECT p.positionId, $seq, $date, $qty, $qtyFactor, $cost, $costFactor, $gain, $gainFactor, $notes, $source FROM position p INNER JOIN person w USING (personId) INNER JOIN account a USING (accountId) INNER JOIN stock s USING (stockId) WHERE s.ticker = $ticker AND a.name = $account AND w.name = $person  ON CONFLICT DO UPDATE SET date = excluded.date, qty = excluded.qty, qtyFactor = excluded.qtyFactor, cost = excluded.cost, costFactor = excluded.costFactor, gain = excluded.gain, gainFactor = excluded.gainFactor, notes = excluded.notes, source = excluded.source, updated = excluded.updated");
+const selectActiveStocks$1=SQL.from("SELECT ticker from stock WHERE stockId IN ( SELECT stockId FROM stock_dividend UNION SELECT stockId FROM position WHERE qty != 0 )");
+const selectPositionSheet$1=SQL.from("SELECT p.ticker AS ticker, p.person AS person, p.account AS account, p.qty AS qty, p.value AS value, p.income AS income, s.price AS price, s.dividend AS dividend, s.yield AS yield  FROM position_view p, stock_view s  WHERE p.ticker = s.ticker  ORDER BY ticker, person, account");
+const selectStockSheet$1=SQL.from("SELECT ticker, incomeType, name, price, dividend, notes  FROM stock_view  ORDER BY ticker");
+const selectTradeSheet$1=SQL.from("SELECT person, account, ticker, date, qty, cost, gain  FROM trade_view  ORDER BY person, account, ticker, tradeId");
+
+let opened;
+
+const DB_VERSION = 2;
+
+function open () {
+  if (opened) return
+  opened = true;
+
+  const dbFile = process.env.DB || join(homedir, '.databases', 'findb.sqlite');
+  const db = new SQLite(dbFile);
+  SQL.attach(db);
+  ddl.run();
+  const version = db.pragma('user_version', { simple: true });
+  if (version !== DB_VERSION) {
+    throw new Error('Wrong version of db: ' + dbFile)
+  }
+}
+
+const insertStocks = SQL.transaction(stocks => {
+  for (const { ticker, name, incomeType, notes, source } of stocks) {
+    insertStock.run({
+      ticker,
+      name,
+      incomeType: incomeType || null,
+      notes: notes || null,
+      source
+    });
+  }
+});
+
+const insertPrices = SQL.transaction(prices => {
+  for (const { ticker, name, price, source } of prices) {
+    insertPrice.run({
+      ticker,
+      name,
+      price: price.digits,
+      priceFactor: price.factor,
+      source
+    });
+  }
+  clearOldPrices.run(7);
+});
+
+const insertDividends = SQL.transaction(divs => {
+  for (const { ticker, dividend, source } of divs) {
+    insertDividend.run({
+      ticker,
+      dividend: dividend ? dividend.digits : null,
+      dividendFactor: dividend ? dividend.factor : null,
+      source
+    });
+  }
+  clearOldDividends.run(7);
+});
+
+const insertPositions = SQL.transaction(positions => {
+  clearPositions.run();
+  for (const { ticker, person, account, qty, source } of positions) {
+    insertPosition.run({
+      ticker,
+      person,
+      account,
+      qty: qty ? qty.digits : 0,
+      qtyFactor: qty ? qty.factor : 1,
+      source
+    });
+  }
+});
+
+const insertTrades = SQL.transaction((account, trades) => {
+  clearTrades.run(account);
+  for (const trade of trades) {
+    const {
+      ticker,
+      account,
+      person,
+      seq,
+      date,
+      qty,
+      cost,
+      gain,
+      notes,
+      source
+    } = trade;
+    insertTrade.run({
+      ticker,
+      account,
+      person,
+      seq,
+      date,
+      qty: qty ? qty.digits : null,
+      qtyFactor: qty ? qty.factor : null,
+      cost: cost ? cost.digits : null,
+      costFactor: cost ? cost.factor : null,
+      gain: gain ? gain.digits : null,
+      gainFactor: gain ? gain.factor : null,
+      notes: notes || null,
+      source
+    });
+  }
+  deleteTrades.run();
+});
+
+function selectActiveStocks () {
+  return selectActiveStocks$1.pluck().all()
+}
+
+function selectPositionSheet () {
+  return selectPositionSheet$1.all()
+}
+
+function selectTradeSheet () {
+  return selectTradeSheet$1.all()
+}
+
+function selectStockSheet () {
+  return selectStockSheet$1.all()
 }
 
 const allColours = (
@@ -256,461 +455,6 @@ function makeLogger (base, changes = {}) {
 }
 
 const log = makeLogger();
-
-/* c8 ignore next 4 */
-const customInspect = Symbol
-  ? Symbol.for('nodejs.util.inspect.custom')
-  : '_customInspect';
-const hasBig = typeof BigInt === 'function';
-const big = hasBig ? BigInt : x => Math.floor(Number(x));
-const big0 = big(0);
-const big1 = big(1);
-const big2 = big(2);
-const sgn = d => d >= big0;
-const abs = d => (sgn(d) ? d : -d);
-const divBig = (x, y) => {
-  const s = sgn(x) ? sgn(y) : !sgn(y);
-  x = abs(x);
-  y = abs(y);
-  const r = x % y;
-  const n = x / y + (r * big2 >= y ? big1 : big0);
-  return s ? n : -n
-};
-/* c8 ignore next */
-const div = hasBig ? divBig : (x, y) => Math.round(x / y);
-const rgxNumber = /^-?\d+(?:\.\d+)?$/;
-
-const synonyms = {
-  precision: 'withPrecision',
-  withPrec: 'withPrecision',
-  withDP: 'withPrecision',
-  toJSON: 'toString'
-};
-
-function decimal (x, opts = {}) {
-  if (x instanceof Decimal) return x
-  if (typeof x === 'bigint') return new Decimal(x, 0)
-  if (typeof x === 'number') {
-    if (Number.isInteger(x)) return new Decimal(big(x), 0)
-    x = x.toString();
-  }
-  if (typeof x !== 'string') throw new TypeError('Invalid number: ' + x)
-  if (!rgxNumber.test(x)) throw new TypeError('Invalid number: ' + x)
-  const i = x.indexOf('.');
-  if (i > -1) {
-    x = x.replace('.', '');
-    return new Decimal(big(x), x.length - i)
-  } else {
-    return new Decimal(big(x), 0)
-  }
-}
-
-decimal.isDecimal = function isDecimal (d) {
-  return d instanceof Decimal
-};
-
-class Decimal {
-  constructor (digs, prec) {
-    this._d = digs;
-    this._p = prec;
-    Object.freeze(this);
-  }
-
-  [customInspect] (depth, opts) {
-    /* c8 ignore next */
-    if (depth < 0) return opts.stylize('[Decimal]', 'number')
-    return `Decimal { ${opts.stylize(this.toString(), 'number')} }`
-  }
-
-  toNumber () {
-    const factor = getFactor(this._p);
-    return Number(this._d) / Number(factor)
-  }
-
-  toString () {
-    const s = sgn(this._d);
-    const p = this._p;
-    const d = abs(this._d);
-    let t = d.toString().padStart(p + 1, '0');
-    if (p) t = t.slice(0, -p) + '.' + t.slice(-p);
-    return s ? t : '-' + t
-  }
-
-  withPrecision (p) {
-    const prec = this._p;
-    if (prec === p) return this
-    if (p > prec) {
-      const f = getFactor(p - prec);
-      return new Decimal(this._d * f, p)
-    } else {
-      const f = getFactor(prec - p);
-      return new Decimal(div(this._d, f), p)
-    }
-  }
-
-  neg () {
-    return new Decimal(-this._d, this._p)
-  }
-
-  add (other) {
-    other = decimal(other);
-    if (other._p > this._p) return other.add(this)
-    other = other.withPrecision(this._p);
-    return new Decimal(this._d + other._d, this._p)
-  }
-
-  sub (other) {
-    other = decimal(other);
-    return this.add(other.neg())
-  }
-
-  mul (other) {
-    other = decimal(other);
-    // x*10^-a * y*10^-b = xy*10^-(a+b)
-    return new Decimal(this._d * other._d, this._p + other._p).withPrecision(
-      this._p
-    )
-  }
-
-  div (other) {
-    other = decimal(other);
-    // x*10^-a / y*10^-b = (x/y)*10^-(a-b)
-    return new Decimal(div(this._d * getFactor(other._p), other._d), this._p)
-  }
-
-  abs () {
-    if (sgn(this._d)) return this
-    return new Decimal(-this._d, this._p)
-  }
-
-  cmp (other) {
-    other = decimal(other);
-    if (this._p < other._p) return -other.cmp(this) || 0
-    other = other.withPrecision(this._p);
-    return this._d < other._d ? -1 : this._d > other._d ? 1 : 0
-  }
-
-  eq (other) {
-    return this.cmp(other) === 0
-  }
-
-  normalise () {
-    if (this._d === big0) return this.withPrecision(0)
-    for (let i = 0; i < this._p; i++) {
-      if (this._d % getFactor(i + 1) !== big0) {
-        return this.withPrecision(this._p - i)
-      }
-    }
-    return this.withPrecision(0)
-  }
-}
-
-for (const k in synonyms) {
-  Decimal.prototype[k] = Decimal.prototype[synonyms[k]];
-}
-
-const factors = [];
-function getFactor (n) {
-  n = Math.floor(n);
-  return n in factors ? factors[n] : (factors[n] = big(10) ** big(n))
-}
-
-const sql = {};
-
-const ddl = `
-  CREATE TABLE IF NOT EXISTS stock(
-    ticker TEXT PRIMARY KEY,
-    name TEXT,
-    incomeType TEXT,
-    notes TEXT,
-    dividend TEXT,
-    price TEXT,
-    priceSource TEXT,
-    priceUpdated TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS position(
-    who TEXT,
-    account TEXT,
-    ticker TEXT,
-    qty TEXT,
-    PRIMARY KEY (who, account, ticker)
-  );
-
-  CREATE TABLE IF NOT EXISTS trade(
-    who TEXT,
-    account TEXT,
-    ticker TEXT,
-    seq INTEGER,
-    date TEXT,
-    cost TEXT,
-    qty TEXT,
-    gain TEXT,
-    notes TEXT,
-    PRIMARY KEY (who, account, ticker, seq)
-  );
-`;
-
-sql.insertStock = `
-  INSERT INTO stock
-    (ticker, name, incomeType, notes)
-  VALUES
-    ($ticker, $name, $incomeType, $notes)
-  ON CONFLICT DO UPDATE
-    SET name       = excluded.name,
-        incomeType = excluded.incomeType,
-        notes      = excluded.notes
-`;
-
-sql.clearAllDividends = `
-  UPDATE stock
-    SET dividend = NULL
-`;
-
-sql.insertDividend = `
-  INSERT INTO stock
-    (ticker, dividend)
-  VALUES
-    ($ticker, $dividend)
-  ON CONFLICT DO UPDATE
-    SET dividend = excluded.dividend
-`;
-
-sql.clearAllPositions = `
-  UPDATE position
-    SET qty = NULL
-`;
-
-sql.insertPosition = `
-  INSERT INTO position
-    (who, account, ticker, qty)
-  VALUES
-    ($who, $account, $ticker, $qty)
-  ON CONFLICT DO UPDATE
-    SET qty = excluded.qty
-`;
-
-sql.deleteOldPositions = `
-  DELETE FROM position
-    WHERE qty IS NULL
-`;
-
-sql.clearAllTrades = `
-  UPDATE trade
-    SET qty  = NULL,
-        cost = NULL
-`;
-
-sql.insertTrade = `
-  INSERT INTO trade
-    (who, account, ticker, seq, date, qty, cost, gain, notes)
-  VALUES
-    ($who, $account, $ticker, $seq, $date, $qty, $cost, $gain, $notes)
-  ON CONFLICT DO UPDATE
-    SET date  = excluded.date,
-        qty   = excluded.qty,
-        cost  = excluded.cost,
-        gain  = excluded.gain,
-        notes = excluded.notes
-`;
-
-sql.deleteOldTrades = `
-  DELETE FROM trade
-    WHERE qty  IS NULL
-      AND cost IS NULL
-`;
-
-sql.updateStockName = `
-  UPDATE stock
-    SET name = $name
-  WHERE ticker = $ticker
-    AND name IS NULL
-`;
-
-sql.clearAllPrices = `
-  UPDATE stock
-    SET price        = NULL,
-        priceSource  = NULL,
-        priceUpdated = NULL
-    WHERE dividend IS NULL
-      OR ticker NOT IN (
-        SELECT ticker
-        FROM   position
-      )
-`;
-
-sql.updatePrice = `
-  UPDATE stock
-    SET  price        = $price,
-         priceSource  = $priceSource,
-         priceUpdated = $priceUpdated
-    WHERE ticker = $ticker
-`;
-
-sql.selectActiveTickers = `
-  SELECT  ticker
-    FROM  stock
-    WHERE dividend IS NOT NULL
-  UNION
-  SELECT  ticker
-    FROM  position
-`;
-
-sql.selectPositions = `
-  SELECT p.ticker as ticker, who, account, qty, price, dividend
-    FROM  position p, stock s
-    WHERE p.ticker = s.ticker
-    ORDER BY ticker, who, account
-`;
-
-sql.selectTrades = `
-  SELECT who, account, ticker, seq, date, qty, cost, gain
-    FROM trade
-    ORDER BY who, account, ticker, seq
-`;
-
-sql.selectStocks = `
-  SELECT ticker, incomeType, name, price, dividend, notes
-    FROM stock
-    ORDER BY ticker
-`;
-
-const DB_NAME = process.env.DB_NAME || 'findb.sqlite';
-const DB_DIR = process.env.DB_DIR || resolve(homedir(), '.databases');
-
-const db = new SQLite(join(DB_DIR, DB_NAME));
-
-db.pragma('journal_mode = WAL');
-db.exec(tidy(ddl));
-for (const k in sql) sql[k] = db.prepare(tidy(sql[k]));
-
-function activeStockTickers () {
-  return sql.selectActiveTickers.pluck().all()
-}
-
-function getStocks () {
-  return sql.selectStocks.all().map(row =>
-    adjust(row, {
-      price: maybeDecimal,
-      dividend: maybeDecimal
-    })
-  )
-}
-
-function getPositions () {
-  return sql.selectPositions.all().map(row => {
-    row = adjust(row, {
-      qty: maybeDecimal,
-      price: maybeDecimal,
-      dividend: maybeDecimal
-    });
-    return calcDerived(row)
-  })
-}
-
-function calcDerived (row) {
-  const { qty, price, dividend } = row;
-  if (price && dividend) {
-    row.yield = dividend
-      .withPrecision(9)
-      .div(price)
-      .withPrecision(3);
-  }
-  if (qty && price) {
-    row.value = price.mul(qty).withPrecision(2);
-  }
-  if (qty && dividend) {
-    row.income = dividend.mul(qty).withPrecision(2);
-  }
-  return row
-}
-
-function getTrades () {
-  return sql.selectTrades.all().map(row =>
-    adjust(row, {
-      qty: maybeDecimal,
-      cost: maybeDecimal,
-      gain: maybeDecimal
-    })
-  )
-}
-
-const updateStockDetails = db.transaction(stocks =>
-  stocks.forEach(({ ticker, name, incomeType, notes }) =>
-    sql.insertStock.run({
-      ticker,
-      name: name || null,
-      incomeType: incomeType || null,
-      notes: notes || null
-    })
-  )
-);
-
-const updateDividends = db.transaction(divis => {
-  sql.clearAllDividends.run();
-  divis.forEach(({ ticker, dividend }) =>
-    sql.insertDividend.run({ ticker, dividend: dividend.toString() })
-  );
-});
-
-const updatePositions = db.transaction(positions => {
-  sql.clearAllPositions.run();
-  positions.forEach(({ who, account, ticker, qty }) =>
-    sql.insertPosition.run({ who, account, ticker, qty: qty.toString() })
-  );
-  sql.deleteOldPositions.run();
-});
-
-const updateTrades = db.transaction(trades => {
-  sql.clearAllTrades.run();
-  trades.forEach(
-    ({ who, account, ticker, seq, date, cost, qty, gain, notes }) =>
-      sql.insertTrade.run({
-        who,
-        account,
-        ticker,
-        seq,
-        date,
-        cost: cost ? cost.toString() : null,
-        qty: qty ? qty.toString() : null,
-        gain: gain ? gain.toString() : null,
-        notes: notes || null
-      })
-  );
-  sql.deleteOldTrades.run();
-});
-
-const updatePrices = db.transaction(prices => {
-  sql.clearAllPrices.run();
-  prices.forEach(({ ticker, name, price, priceSource, priceUpdated }) => {
-    sql.updateStockName.run({ ticker, name });
-    sql.updatePrice.run({
-      ticker,
-      price: price.toString(),
-      priceSource,
-      priceUpdated
-    });
-  });
-});
-
-function adjust (obj, fns) {
-  const ret = { ...obj };
-  for (const k in fns) {
-    ret[k] = fns[k].call(ret, ret[k]);
-  }
-  return ret
-}
-
-function tidy (sql) {
-  return sql
-    .split('\n')
-    .map(s => s.trim())
-    .join(' ')
-}
-
-function maybeDecimal (x) {
-  return x ? decimal(x) : undefined
-}
 
 function once (fn) {
   function f (...args) {
@@ -961,9 +705,10 @@ async function importStocks (opts) {
     .filter(validRow)
     .map(rowAttribs)
     .map(validAttribs)
-    .map(makeObject);
+    .map(makeObject)
+    .map(o => ({ ...o, source: 'sheet:stocks' }));
 
-  updateStockDetails(data);
+  insertStocks(data);
 
   debug$7('Loaded %d records from stocks', data.length);
 }
@@ -1009,6 +754,171 @@ function tinydate (str, custom) {
 	};
 }
 
+const customInspect = Symbol.for('nodejs.util.inspect.custom');
+const div = (x, y) => {
+  const pos = x >= 0n ? y > 0n : y < 0n;
+  x = x < 0n ? -x : x;
+  y = y < 0n ? -y : y;
+  const r = x % y;
+  const n = x / y + (r * 2n >= y ? 1n : 0n);
+  return pos ? n : -n
+};
+/* c8 ignore next */
+const rgxNumber = /^-?\d+(?:\.\d+)?$/;
+
+const synonyms = {
+  withPrec: 'withPrecision',
+  withDP: 'withPrecision',
+  toJSON: 'toString'
+};
+
+function decimal (x, opts = {}) {
+  if (x instanceof Decimal) return x
+  if (typeof x === 'bigint') return new Decimal(x, 0)
+  if (typeof x === 'number') {
+    if (Number.isInteger(x)) return new Decimal(BigInt(x), 0)
+    x = x.toString();
+  }
+  if (typeof x !== 'string') throw new TypeError('Invalid number: ' + x)
+  if (!rgxNumber.test(x)) throw new TypeError('Invalid number: ' + x)
+  const i = x.indexOf('.');
+  if (i > -1) {
+    x = x.replace('.', '');
+    return new Decimal(BigInt(x), x.length - i)
+  } else {
+    return new Decimal(BigInt(x), 0)
+  }
+}
+decimal.from = function from ({ digits, precision, factor }) {
+  if (precision == null) {
+    precision = 0;
+    while (getFactor(precision) < factor) precision++;
+  }
+  return new Decimal(BigInt(digits), precision)
+};
+
+decimal.isDecimal = function isDecimal (d) {
+  return d instanceof Decimal
+};
+
+class Decimal {
+  constructor (digs, prec) {
+    this._d = digs;
+    this._p = prec;
+    Object.freeze(this);
+  }
+
+  [customInspect] (depth, opts) {
+    /* c8 ignore next */
+    if (depth < 0) return opts.stylize('[Decimal]', 'number')
+    return `Decimal { ${opts.stylize(this.toString(), 'number')} }`
+  }
+
+  get digits () {
+    return this._d
+  }
+
+  get precision () {
+    return this._p
+  }
+
+  get factor () {
+    return getFactor(this._p)
+  }
+
+  toNumber () {
+    const factor = getFactor(this._p);
+    return Number(this._d) / Number(factor)
+  }
+
+  toString () {
+    const neg = this._d < 0n;
+    const p = this._p;
+    const d = neg ? -this._d : this._d;
+    let t = d.toString().padStart(p + 1, '0');
+    if (p) t = t.slice(0, -p) + '.' + t.slice(-p);
+    return neg ? '-' + t : t
+  }
+
+  withPrecision (p) {
+    const prec = this._p;
+    if (prec === p) return this
+    if (p > prec) {
+      const f = getFactor(p - prec);
+      return new Decimal(this._d * f, p)
+    } else {
+      const f = getFactor(prec - p);
+      return new Decimal(div(this._d, f), p)
+    }
+  }
+
+  neg () {
+    return new Decimal(-this._d, this._p)
+  }
+
+  add (other) {
+    other = decimal(other);
+    if (other._p > this._p) return other.add(this)
+    other = other.withPrecision(this._p);
+    return new Decimal(this._d + other._d, this._p)
+  }
+
+  sub (other) {
+    other = decimal(other);
+    return this.add(other.neg())
+  }
+
+  mul (other) {
+    other = decimal(other);
+    // x*10^-a * y*10^-b = xy*10^-(a+b)
+    return new Decimal(this._d * other._d, this._p + other._p).withPrecision(
+      this._p
+    )
+  }
+
+  div (other) {
+    other = decimal(other);
+    // x*10^-a / y*10^-b = (x/y)*10^-(a-b)
+    return new Decimal(div(this._d * getFactor(other._p), other._d), this._p)
+  }
+
+  abs () {
+    if (this._d >= 0n) return this
+    return new Decimal(-this._d, this._p)
+  }
+
+  cmp (other) {
+    other = decimal(other);
+    if (this._p < other._p) return -other.cmp(this) || 0
+    other = other.withPrecision(this._p);
+    return this._d < other._d ? -1 : this._d > other._d ? 1 : 0
+  }
+
+  eq (other) {
+    return this.cmp(other) === 0
+  }
+
+  normalise () {
+    if (this._d === 0n) return this.withPrecision(0)
+    for (let i = 0; i < this._p; i++) {
+      if (this._d % getFactor(i + 1) !== 0n) {
+        return this.withPrecision(this._p - i)
+      }
+    }
+    return this.withPrecision(0)
+  }
+}
+
+for (const k in synonyms) {
+  Decimal.prototype[k] = Decimal.prototype[synonyms[k]];
+}
+
+const factors = [];
+function getFactor (n) {
+  n = Math.floor(n);
+  return n in factors ? factors[n] : (factors[n] = 10n ** BigInt(n))
+}
+
 function importDecimal (x, prec) {
   if (x == null || x === '') return undefined
   const d = decimal(x);
@@ -1039,7 +949,7 @@ const ACCOUNT_LIST =
 const DIV_COLUMN = 26; // column AA
 const accts = ACCOUNT_LIST.split(';')
   .map(code => code.split(','))
-  .map(([who, account]) => ({ who, account }));
+  .map(([person, account]) => ({ person, account }));
 
 async function importPortfolio () {
   const rangeData = await getSheetData(SOURCE.name, SOURCE.range);
@@ -1053,7 +963,8 @@ async function importDividends (rangeData) {
   const validTicker = ([ticker]) => !!ticker;
   const makeObj = ([ticker, dividend]) => ({
     ticker,
-    dividend: importDecimal(dividend)
+    dividend: importDecimal(dividend),
+    source: 'sheets:portfolio'
   });
 
   const data = rangeData
@@ -1061,7 +972,7 @@ async function importDividends (rangeData) {
     .filter(validTicker)
     .map(makeObj);
 
-  updateDividends(data);
+  insertDividends(data);
   debug$6('Updated %d dividends', data.length);
 }
 
@@ -1081,9 +992,10 @@ async function importPositions (rangeData, opts) {
     .filter(validRow)
     .map(expandPositons)
     .flat(1)
-    .filter(validPos);
+    .filter(validPos)
+    .map(o => ({ ...o, source: 'sheets:portfolio' }));
 
-  updatePositions(updates);
+  insertPositions(updates);
 
   debug$6('%d positions updated', updates.length);
 }
@@ -1127,11 +1039,12 @@ async function importTrades () {
     let seq = 0;
     for (const trade of group) {
       trade.seq = ++seq;
+      trade.source = 'sheets:trades';
       updates.push(trade);
     }
   }
 
-  updateTrades(updates);
+  insertTrades('Dealing', updates);
   debug$5('Updated %d positions with %d trades', groups.length, updates.length);
 }
 
@@ -1146,12 +1059,12 @@ function getTradeGroups (rows) {
 
 function readTrades (rows) {
   const account = 'Dealing';
-  let who;
+  let person;
   let ticker;
   const rowToObject = row => {
-    const [who_, ticker_, date, qty, cost, notes] = row;
+    const [person_, ticker_, date, qty, cost, notes] = row;
     return {
-      who: (who = who_ || who),
+      person: (person = person_ || person),
       account,
       ticker: (ticker = ticker_ || ticker),
       date: importDate(date),
@@ -1161,14 +1074,14 @@ function readTrades (rows) {
     }
   };
 
-  const validTrade = t => t.who && t.ticker && t.date && (t.qty || t.cost);
+  const validTrade = t => t.person && t.ticker && t.date && (t.qty || t.cost);
 
   return rows.map(rowToObject).filter(validTrade)
 }
 
 function sortTrades (trades) {
   return trades.sort(
-    sortBy('who')
+    sortBy('person')
       .thenBy('account')
       .thenBy('ticker')
       .thenBy('date')
@@ -1176,7 +1089,7 @@ function sortTrades (trades) {
 }
 
 function groupTrades (trades) {
-  const key = t => `${t.who}_${t.account}_${t.ticker}`;
+  const key = t => `${t.person}_${t.account}_${t.ticker}`;
   const groups = [];
   let prev;
   let group;
@@ -1451,7 +1364,7 @@ function makeCondition (string) {
 const USER_AGENT =
   'Mozilla/5.0 (X11; CrOS x86_64 13729.56.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.95 Safari/537.36';
 
-const toISODateTime = tinydate(
+tinydate(
   '{YYYY}-{MM}-{DD}T{HH}:{mm}:{ss}.{fff}{TZ}',
   { TZ: getTZString }
 );
@@ -1508,17 +1421,16 @@ function fetchSector (sectorName) {
   return fetchCollection(url, 'sp-sectors__table', `lse:sector:${sectorName}`)
 }
 
-async function * fetchCollection (url, collClass, priceSource) {
+async function * fetchCollection (url, collClass, source) {
   await sleep(500);
 
-  const priceUpdated = toISODateTime(new Date());
   let count = 0;
   const items = [];
   const addItem = data => {
     const { name, ticker } = extractNameAndTicker(data[0]);
     const price = extractPriceInPence(data[1]);
     if (price) {
-      items.push({ ticker, name, price, priceUpdated, priceSource });
+      items.push({ ticker, name, price, source });
       count++;
     }
   };
@@ -1534,15 +1446,15 @@ async function * fetchCollection (url, collClass, priceSource) {
     .when('td')
     .on('text', t => row.push(t));
 
-  const source = await get(url);
-  source.setEncoding('utf8');
+  const data = await get(url);
+  data.setEncoding('utf8');
 
-  for await (const chunk of source) {
+  for await (const chunk of data) {
     scrapie.write(chunk);
     yield * items.splice(0);
   }
 
-  debug$4('Read %d items from %s', count, priceSource);
+  debug$4('Read %d items from %s', count, source);
 }
 
 async function fetchPrice (ticker) {
@@ -1557,8 +1469,7 @@ async function fetchPrice (ticker) {
     ticker,
     name: '',
     price: undefined,
-    priceUpdated: toISODateTime(new Date()),
-    priceSource: 'lse:share'
+    source: 'lse:share'
   };
 
   const scrapie = new Scrapie();
@@ -1574,10 +1485,10 @@ async function fetchPrice (ticker) {
     item.price = item.price || extractPriceInPence(t);
   });
 
-  const source = await get(url);
-  source.setEncoding('utf8');
+  const data = await get(url);
+  data.setEncoding('utf8');
 
-  for await (const chunk of source) {
+  for await (const chunk of data) {
     scrapie.write(chunk);
   }
 
@@ -1619,13 +1530,13 @@ const attempts = [
 ];
 
 async function fetchPrices () {
-  const needed = new Set(activeStockTickers());
+  const needed = new Set(selectActiveStocks());
   const updates = [];
   for await (const item of getPrices(needed)) {
     if (item.price) updates.push(item);
   }
 
-  updatePrices(updates);
+  insertPrices(updates);
 }
 
 async function * getPrices (tickers) {
@@ -1651,8 +1562,43 @@ async function * getPrices (tickers) {
   debug$3('%d prices individually: %s', needed.size, [...needed].join(', '));
 }
 
-function exportDecimal (x) {
-  return x ? x.toNumber() : 0
+const debug$2 = log
+  .prefix('export:positions:')
+  .colour()
+  .level(2);
+
+const positions = { name: 'Positions', range: 'Positions!A2:I' };
+const timestamp = { name: 'Positions', range: 'Positions!K1' };
+
+async function exportPositions (opts) {
+  const data = selectPositionSheet().map(makePositionRow);
+  await overwriteSheetData(positions.name, positions.range, data);
+  await putSheetData(timestamp.name, timestamp.range, [[new Date()]]);
+  debug$2('position sheet updated');
+}
+
+function makePositionRow ({
+  ticker,
+  person,
+  account,
+  qty,
+  price,
+  dividend,
+  yield: _yield,
+  value,
+  income
+}) {
+  return [
+    ticker,
+    person,
+    account,
+    qty || 0,
+    price || 0,
+    dividend || 0,
+    _yield || 0,
+    value || 0,
+    income || 0
+  ]
 }
 
 function makeCSV (arr) {
@@ -1675,45 +1621,6 @@ function exportDate (x) {
   return SerialDate.fromParts(parts).serial
 }
 
-const debug$2 = log
-  .prefix('export:positions:')
-  .colour()
-  .level(2);
-
-const positions = { name: 'Positions', range: 'Positions!A2:I' };
-const timestamp = { name: 'Positions', range: 'Positions!K1' };
-
-async function exportPositions (opts) {
-  const data = getPositions().map(makePositionRow);
-  await overwriteSheetData(positions.name, positions.range, data);
-  await putSheetData(timestamp.name, timestamp.range, [[new Date()]]);
-  debug$2('position sheet updated');
-}
-
-function makePositionRow ({
-  ticker,
-  who,
-  account,
-  qty,
-  price,
-  dividend,
-  yield: _yield,
-  value,
-  income
-}) {
-  return [
-    ticker,
-    who,
-    account,
-    exportDecimal(qty),
-    exportDecimal(price),
-    exportDecimal(dividend),
-    exportDecimal(_yield),
-    exportDecimal(value),
-    exportDecimal(income)
-  ]
-}
-
 const debug$1 = log
   .prefix('export:trades:')
   .colour()
@@ -1722,7 +1629,7 @@ const debug$1 = log
 const trades = { name: 'Positions', range: 'Trades!A2:G' };
 
 async function exportTrades (opts) {
-  const data = getTrades().map(makeTradeRow);
+  const data = selectTradeSheet().map(makeTradeRow);
 
   await overwriteSheetData(trades.name, trades.range, data);
   debug$1('trades sheet updated');
@@ -1730,13 +1637,13 @@ async function exportTrades (opts) {
 
 function makeTradeRow (t) {
   return [
-    t.who,
+    t.person,
     t.account,
     t.ticker,
     exportDate(t.date),
-    exportDecimal(t.qty),
-    exportDecimal(t.cost),
-    exportDecimal(t.gain)
+    t.qty || 0,
+    t.cost || 0,
+    t.gain || 0
   ]
 }
 
@@ -1948,7 +1855,7 @@ const STOCKS_URI = 'gs://finance-readersludlow/stocks.csv';
 const TEMPFILE = '/tmp/stocks.csv';
 
 async function exportStocks () {
-  const data = getStocks()
+  const data = selectStockSheet()
     .map(stockToRow)
     .map(makeCSV)
     .join('');
@@ -1963,15 +1870,16 @@ function stockToRow (row) {
   const { ticker, incomeType, name, price, dividend, notes } = row;
   return [
     ticker,
-    incomeType,
-    name,
-    exportDecimal(price),
-    exportDecimal(dividend),
-    notes
+    incomeType || '',
+    name || '',
+    price || 0,
+    dividend || 0,
+    notes || ''
   ]
 }
 
 async function main (opts) {
+  open();
   const cmds = opts._;
   while (cmds.length) {
     const cmd = cmds.shift();
@@ -2007,7 +1915,7 @@ function bail (err) {
   process.exit(2);
 }
 
-const version = '1.1.3';
+const version = '1.2.0';
 const opts = mri(process.argv.slice(2), {
   alias: {
     help: 'h',
