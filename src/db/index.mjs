@@ -14,11 +14,14 @@ export function open () {
   if (opened) return
   opened = true
 
-  const dbFile = process.env.DB || join(homedir, '.databases', 'findb.sqlite')
+  const dbFile = process.env.DB || join(homedir(), '.databases', 'findb.sqlite')
   const db = new SQLite(dbFile)
   SQL.attach(db)
   sql.ddl.run()
-  const version = db.pragma('user_version', { simple: true })
+  const version = db
+    .prepare('select version from dbversion')
+    .pluck()
+    .get()
   if (version !== DB_VERSION) {
     throw new Error('Wrong version of db: ' + dbFile)
   }

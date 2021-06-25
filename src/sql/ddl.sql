@@ -1,6 +1,8 @@
 PRAGMA journal_mode = WAL;
-PRAGMA user_version = 2;
 PRAGMA foreign_keys = TRUE;
+
+CREATE VIEW IF NOT EXISTS dbversion AS
+    SELECT 2 AS version;
 
 CREATE TABLE IF NOT EXISTS stock(
     stockId INTEGER PRIMARY KEY,
