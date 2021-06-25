@@ -3,7 +3,7 @@ import sortBy from 'sortby'
 import decimal from 'decimal'
 
 import { getSheetData } from '../sheets.mjs'
-import { updateTrades } from '../db.mjs'
+import { insertTrades } from '../db/index.mjs'
 import { importDate, importDecimal } from './util.mjs'
 
 const debug = log
@@ -27,11 +27,12 @@ export default async function importTrades () {
     let seq = 0
     for (const trade of group) {
       trade.seq = ++seq
+      trade.source = 'sheets:trades'
       updates.push(trade)
     }
   }
 
-  updateTrades(updates)
+  insertTrades('Dealing', updates)
   debug('Updated %d positions with %d trades', groups.length, updates.length)
 }
 
@@ -46,12 +47,12 @@ function getTradeGroups (rows) {
 
 function readTrades (rows) {
   const account = 'Dealing'
-  let who
+  let person
   let ticker
   const rowToObject = row => {
-    const [who_, ticker_, date, qty, cost, notes] = row
+    const [person_, ticker_, date, qty, cost, notes] = row
     return {
-      who: (who = who_ || who),
+      person: (person = person_ || person),
       account,
       ticker: (ticker = ticker_ || ticker),
       date: importDate(date),
@@ -61,14 +62,14 @@ function readTrades (rows) {
     }
   }
 
-  const validTrade = t => t.who && t.ticker && t.date && (t.qty || t.cost)
+  const validTrade = t => t.person && t.ticker && t.date && (t.qty || t.cost)
 
   return rows.map(rowToObject).filter(validTrade)
 }
 
 function sortTrades (trades) {
   return trades.sort(
-    sortBy('who')
+    sortBy('person')
       .thenBy('account')
       .thenBy('ticker')
       .thenBy('date')
@@ -76,7 +77,7 @@ function sortTrades (trades) {
 }
 
 function groupTrades (trades) {
-  const key = t => `${t.who}_${t.account}_${t.ticker}`
+  const key = t => `${t.person}_${t.account}_${t.ticker}`
   const groups = []
   let prev
   let group

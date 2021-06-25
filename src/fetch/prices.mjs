@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { activeStockTickers, updatePrices } from '../db.mjs'
+import { selectActiveStocks, insertPrices } from '../db/index.mjs'
 import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
 
 const debug = log
@@ -16,13 +16,13 @@ const attempts = [
 ]
 
 export default async function fetchPrices () {
-  const needed = new Set(activeStockTickers())
+  const needed = new Set(selectActiveStocks())
   const updates = []
   for await (const item of getPrices(needed)) {
     if (item.price) updates.push(item)
   }
 
-  updatePrices(updates)
+  insertPrices(updates)
 }
 
 async function * getPrices (tickers) {

@@ -1,3 +1,4 @@
+import { open as openDatabase } from './db/index.mjs'
 import importStocks from './import/stocks.mjs'
 import importPortfolio from './import/portfolio.mjs'
 import importTrades from './import/trades.mjs'
@@ -7,6 +8,7 @@ import exportTrades from './export/trades.mjs'
 import exportStocks from './export/stocks.mjs'
 
 export default async function main (opts) {
+  openDatabase()
   const cmds = opts._
   while (cmds.length) {
     const cmd = cmds.shift()

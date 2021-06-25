@@ -3,7 +3,7 @@ import sleep from 'pixutil/sleep'
 import Scrapie from 'scrapie'
 import decimal from 'decimal'
 
-import { get, toISODateTime } from './util.mjs'
+import { get } from './util.mjs'
 
 const debug = log
   .prefix('fetch:lse:')
@@ -27,17 +27,16 @@ export function fetchSector (sectorName) {
   return fetchCollection(url, 'sp-sectors__table', `lse:sector:${sectorName}`)
 }
 
-async function * fetchCollection (url, collClass, priceSource) {
+async function * fetchCollection (url, collClass, source) {
   await sleep(500)
 
-  const priceUpdated = toISODateTime(new Date())
   let count = 0
   const items = []
   const addItem = data => {
     const { name, ticker } = extractNameAndTicker(data[0])
     const price = extractPriceInPence(data[1])
     if (price) {
-      items.push({ ticker, name, price, priceUpdated, priceSource })
+      items.push({ ticker, name, price, source })
       count++
     }
   }
@@ -53,15 +52,15 @@ async function * fetchCollection (url, collClass, priceSource) {
     .when('td')
     .on('text', t => row.push(t))
 
-  const source = await get(url)
-  source.setEncoding('utf8')
+  const data = await get(url)
+  data.setEncoding('utf8')
 
-  for await (const chunk of source) {
+  for await (const chunk of data) {
     scrapie.write(chunk)
     yield * items.splice(0)
   }
 
-  debug('Read %d items from %s', count, priceSource)
+  debug('Read %d items from %s', count, source)
 }
 
 export async function fetchPrice (ticker) {
@@ -76,8 +75,7 @@ export async function fetchPrice (ticker) {
     ticker,
     name: '',
     price: undefined,
-    priceUpdated: toISODateTime(new Date()),
-    priceSource: 'lse:share'
+    source: 'lse:share'
   }
 
   const scrapie = new Scrapie()
@@ -93,10 +91,10 @@ export async function fetchPrice (ticker) {
     item.price = item.price || extractPriceInPence(t)
   })
 
-  const source = await get(url)
-  source.setEncoding('utf8')
+  const data = await get(url)
+  data.setEncoding('utf8')
 
-  for await (const chunk of source) {
+  for await (const chunk of data) {
     scrapie.write(chunk)
   }
 

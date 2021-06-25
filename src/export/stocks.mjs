@@ -3,8 +3,8 @@ import { unlink, writeFile } from 'fs/promises'
 import log from 'logjs'
 import { upload } from 'googlejs/storage'
 
-import { getStocks } from '../db.mjs'
-import { exportDecimal, makeCSV } from './util.mjs'
+import { selectStockSheet } from '../db/index.mjs'
+import { makeCSV } from './util.mjs'
 
 const debug = log
   .prefix('export:stocks:')
@@ -15,7 +15,7 @@ const STOCKS_URI = 'gs://finance-readersludlow/stocks.csv'
 const TEMPFILE = '/tmp/stocks.csv'
 
 export default async function exportStocks () {
-  const data = getStocks()
+  const data = selectStockSheet()
     .map(stockToRow)
     .map(makeCSV)
     .join('')
@@ -30,10 +30,10 @@ function stockToRow (row) {
   const { ticker, incomeType, name, price, dividend, notes } = row
   return [
     ticker,
-    incomeType,
-    name,
-    exportDecimal(price),
-    exportDecimal(dividend),
-    notes
+    incomeType || '',
+    name || '',
+    price || 0,
+    dividend || 0,
+    notes || ''
   ]
 }

@@ -1,7 +1,7 @@
 import log from 'logjs'
 
 import { getSheetData } from '../sheets.mjs'
-import { updateDividends, updatePositions } from '../db.mjs'
+import { insertDividends, insertPositions } from '../db/index.mjs'
 import { importDecimal } from './util.mjs'
 
 const debug = log
@@ -21,7 +21,7 @@ const ACCOUNT_LIST =
 const DIV_COLUMN = 26 // column AA
 const accts = ACCOUNT_LIST.split(';')
   .map(code => code.split(','))
-  .map(([who, account]) => ({ who, account }))
+  .map(([person, account]) => ({ person, account }))
 
 export default async function importPortfolio () {
   const rangeData = await getSheetData(SOURCE.name, SOURCE.range)
@@ -35,7 +35,8 @@ async function importDividends (rangeData) {
   const validTicker = ([ticker]) => !!ticker
   const makeObj = ([ticker, dividend]) => ({
     ticker,
-    dividend: importDecimal(dividend)
+    dividend: importDecimal(dividend),
+    source: 'sheets:portfolio'
   })
 
   const data = rangeData
@@ -43,7 +44,7 @@ async function importDividends (rangeData) {
     .filter(validTicker)
     .map(makeObj)
 
-  updateDividends(data)
+  insertDividends(data)
   debug('Updated %d dividends', data.length)
 }
 
@@ -64,8 +65,9 @@ async function importPositions (rangeData, opts) {
     .map(expandPositons)
     .flat(1)
     .filter(validPos)
+    .map(o => ({ ...o, source: 'sheets:portfolio' }))
 
-  updatePositions(updates)
+  insertPositions(updates)
 
   debug('%d positions updated', updates.length)
 }

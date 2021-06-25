@@ -1,8 +1,7 @@
 import log from 'logjs'
 
-import { getPositions } from '../db.mjs'
+import { selectPositionSheet } from '../db/index.mjs'
 import { overwriteSheetData, putSheetData } from '../sheets.mjs'
-import { exportDecimal } from './util.mjs'
 
 const debug = log
   .prefix('export:positions:')
@@ -13,7 +12,7 @@ const positions = { name: 'Positions', range: 'Positions!A2:I' }
 const timestamp = { name: 'Positions', range: 'Positions!K1' }
 
 export default async function exportPositions (opts) {
-  const data = getPositions().map(makePositionRow)
+  const data = selectPositionSheet().map(makePositionRow)
   await overwriteSheetData(positions.name, positions.range, data)
   await putSheetData(timestamp.name, timestamp.range, [[new Date()]])
   debug('position sheet updated')
@@ -21,7 +20,7 @@ export default async function exportPositions (opts) {
 
 function makePositionRow ({
   ticker,
-  who,
+  person,
   account,
   qty,
   price,
@@ -32,13 +31,13 @@ function makePositionRow ({
 }) {
   return [
     ticker,
-    who,
+    person,
     account,
-    exportDecimal(qty),
-    exportDecimal(price),
-    exportDecimal(dividend),
-    exportDecimal(_yield),
-    exportDecimal(value),
-    exportDecimal(income)
+    qty || 0,
+    price || 0,
+    dividend || 0,
+    _yield || 0,
+    value || 0,
+    income || 0
   ]
 }
