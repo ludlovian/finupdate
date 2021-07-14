@@ -1,6 +1,7 @@
 import log from 'logjs'
 
-import { selectActiveStocks, insertPrices } from '../db/index.mjs'
+import { sql } from '../db/index.mjs'
+import { expandDecimal } from '../import/util.mjs'
 import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
 
 const debug = log
@@ -47,3 +48,32 @@ async function * getPrices (tickers) {
   }
   debug('%d prices individually: %s', needed.size, [...needed].join(', '))
 }
+
+const selectActiveStocks = sql(`
+  SELECT ticker FROM stock
+  WHERE stockId IN (
+    SELECT stockId FROM stock_dividend
+    UNION
+    SELECT stockId FROM position
+    WHERE qty != 0
+  )
+`).pluck().all
+
+const clearOldPrices = sql(`
+  DELETE FROM stock_price
+    WHERE updated < datetime('now', '-' || $days || ' days');
+`)
+
+const insertPrice = sql(`
+  INSERT INTO stock_price_v
+    (ticker, name, price, priceFactor, source)
+  VALUES
+    ($ticker, $name, $price, $priceFactor, $source)
+`)
+
+const insertPrices = sql.transaction(prices => {
+  for (const price of prices) {
+    insertPrice(expandDecimal(price, 'price'))
+  }
+  clearOldPrices({ days: 7 })
+})

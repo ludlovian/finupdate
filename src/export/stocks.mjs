@@ -3,7 +3,7 @@ import { unlink, writeFile } from 'fs/promises'
 import log from 'logjs'
 import { upload } from 'googlejs/storage'
 
-import { selectStockSheet } from '../db/index.mjs'
+import { sql } from '../db/index.mjs'
 import { makeCSV } from './util.mjs'
 
 const debug = log
@@ -37,3 +37,9 @@ function stockToRow (row) {
     notes || ''
   ]
 }
+
+const selectStockSheet = sql(`
+  SELECT  ticker, incomeType, name, price, dividend, notes
+  FROM    stock_view
+  ORDER BY ticker
+`).all

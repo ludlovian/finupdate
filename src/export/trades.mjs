@@ -1,7 +1,7 @@
 import log from 'logjs'
 
 import { overwriteSheetData } from '../sheets.mjs'
-import { selectTradeSheet } from '../db/index.mjs'
+import { sql } from '../db/index.mjs'
 import { exportDate } from './util.mjs'
 
 const debug = log
@@ -29,3 +29,9 @@ function makeTradeRow (t) {
     t.gain || 0
   ]
 }
+
+const selectTradeSheet = sql(`
+  SELECT  person, account, ticker, date, qty, cost, gain
+  FROM    trade_view
+  ORDER BY person, account, ticker, tradeId
+`).all

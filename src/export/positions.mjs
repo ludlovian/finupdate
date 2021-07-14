@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { selectPositionSheet } from '../db/index.mjs'
+import { sql } from '../db/index.mjs'
 import { overwriteSheetData, putSheetData } from '../sheets.mjs'
 
 const debug = log
@@ -41,3 +41,19 @@ function makePositionRow ({
     income || 0
   ]
 }
+
+const selectPositionSheet = sql(`
+  SELECT
+    p.ticker    AS ticker,
+    p.person    AS person,
+    p.account   AS account,
+    p.qty       AS qty,
+    p.value     AS value,
+    p.income    AS income,
+    s.price     AS price,
+    s.dividend  AS dividend,
+    s.yield     AS yield
+  FROM  position_view p
+  JOIN  stock_view s USING (ticker)
+  ORDER BY ticker, person, account
+`).all

@@ -3,8 +3,8 @@ import sortBy from 'sortby'
 import decimal from 'decimal'
 
 import { getSheetData } from '../sheets.mjs'
-import { insertTrades } from '../db/index.mjs'
-import { importDate, importDecimal } from './util.mjs'
+import { sql } from '../db/index.mjs'
+import { importDate, importDecimal, expandDecimal } from './util.mjs'
 
 const debug = log
   .prefix('import:trades:')
@@ -122,3 +122,39 @@ function buildPosition () {
     }
   }
 }
+
+const clearTrades = sql(`
+ UPDATE trade
+  SET (qty, cost, gain) = (NULL, NULL, NULL)
+  WHERE positionId IN (
+    SELECT positionId FROM position
+    WHERE  accountId IN (
+      SELECT accountId FROM account
+      WHERE  name = $account
+    )
+  )
+`)
+
+const insertTrade = sql(`
+  INSERT INTO trade_v
+    (person, account, ticker, seq, date, qty, qtyFactor,
+      cost, costFactor, gain, gainFactor, notes, source)
+  VALUES
+    ($person, $account, $ticker, $seq, $date, $qty, $qtyFactor,
+      $cost, $costFactor, $gain, $gainFactor, $notes, $source)
+`)
+
+const deleteTrades = sql(`
+  DELETE FROM trade
+  WHERE (qty, cost, gain) IS (NULL, NULL, NULL)
+`)
+
+const insertTrades = sql.transaction((account, trades) => {
+  clearTrades({ account })
+  for (let trade of trades) {
+    trade = { qty: null, cost: null, gain: null, notes: null, ...trade }
+    trade = expandDecimal(trade, 'qty', 'cost', 'gain')
+    insertTrade(trade)
+  }
+  deleteTrades()
+})

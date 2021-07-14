@@ -1,6 +1,6 @@
 import log from 'logjs'
 
-import { insertStocks } from '../db/index.mjs'
+import { sql } from '../db/index.mjs'
 import { getSheetData } from '../sheets.mjs'
 
 const debug = log
@@ -33,3 +33,18 @@ export default async function importStocks (opts) {
 
   debug('Loaded %d records from stocks', data.length)
 }
+
+const insertStock = sql(`
+INSERT INTO stock_v
+    (ticker, name, incomeType, notes, source)
+VALUES
+    ($ticker, $name, $incomeType, $notes, $source)
+`)
+
+const insertStocks = sql.transaction(stocks => {
+  for (const stock of stocks) {
+    stock.incomeType = stock.incomeType || null
+    stock.notes = stock.notes || null
+    insertStock(stock)
+  }
+})
