@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+import { format } from 'util';
 import { homedir } from 'os';
 import { join, extname } from 'path';
 import SQLite from 'better-sqlite3';
-import { format } from 'util';
 import { get as get$1 } from 'https';
 import { stat, writeFile, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
@@ -128,208 +128,6 @@ function mri (args, opts) {
 	}
 
 	return out;
-}
-
-let db;
-
-const SQL = {
-  from: sql => statement(tidy(sql)),
-  attach: _db => (db = _db),
-  transaction: fn => transaction(fn)
-};
-
-function statement (sql) {
-  if (!Array.isArray(sql)) sql = sql.split(';');
-
-  const s = {
-    run: (...args) => exec('run', ...args),
-    get: (...args) => exec('get', ...args),
-    all: (...args) => exec('all', ...args),
-    pluck: () => Object.assign(statement(sql), { _pluck: true }),
-    raw: () => Object.assign(statement(sql), { _raw: true })
-  };
-
-  return s
-
-  function exec (cmd, ...args) {
-    const stmts = [...sql];
-    let last = stmts.pop();
-    for (const stmt of stmts) prepare(stmt).run(...args);
-    last = prepare(last);
-    if (s._pluck) last = last.pluck();
-    if (s._raw) last = last.raw();
-    return last[cmd](...args)
-  }
-}
-
-const cache = new Map();
-function prepare (sql) {
-  if (!cache.has(sql)) cache.set(sql, db.prepare(sql));
-  return cache.get(sql)
-}
-
-function transaction (_fn) {
-  let fn;
-  return (...args) => {
-    if (!fn) fn = db.transaction(_fn);
-    return fn(...args)
-  }
-}
-
-function tidyStatement (statement) {
-  return statement
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => !line.startsWith('--'))
-    .map(line => line.replaceAll(/  +/g, ' '))
-    .join(' ')
-    .trim()
-}
-
-function tidy (statements) {
-  return statements
-    .split(';')
-    .map(tidyStatement)
-    .filter(Boolean)
-    .join(';')
-}
-
-const clearOldDividends=SQL.from("DELETE FROM stock_dividend WHERE updated < datetime('now', '-' || ? || ' days')");
-const clearOldPrices=SQL.from("DELETE FROM stock_price WHERE updated < datetime('now', '-' || ? || ' days')");
-const clearPositions=SQL.from("UPDATE position SET qty = 0, qtyFactor = 1, source = NULL, updated = datetime('now') WHERE qty != 0");
-const clearTrades=SQL.from("UPDATE trade SET qty = NULL, cost = NULL, gain = NULL WHERE positionId IN ( SELECT positionId FROM position WHERE accountId IN ( SELECT accountId FROM account WHERE name = ? ) )");
-const ddl=SQL.from("PRAGMA journal_mode = WAL;PRAGMA foreign_keys = TRUE;CREATE VIEW IF NOT EXISTS dbversion AS SELECT 2 AS version;CREATE TABLE IF NOT EXISTS stock( stockId INTEGER PRIMARY KEY, ticker TEXT NOT NULL UNIQUE, name TEXT, incomeType TEXT, notes TEXT, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS stock_dividend( stockId INTEGER PRIMARY KEY REFERENCES stock(stockId), dividend INTEGER NOT NULL, dividendFactor INTEGER NOT NULL DEFAULT 1, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS stock_price( stockId INTEGER PRIMARY KEY REFERENCES stock(stockId), price INTEGER NOT NULL, priceFactor INTEGER NOT NULL, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')) );CREATE TABLE IF NOT EXISTS account( accountId INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE );INSERT OR IGNORE INTO account (name) VALUES ('Dealing'), ('ISA'), ('SIPP'), ('SIPP2');CREATE TABLE IF NOT EXISTS person( personId INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE );INSERT OR IGNORE INTO person (name) VALUES ('AJL'), ('RSGG');CREATE TABLE IF NOT EXISTS position( positionId INTEGER PRIMARY KEY, personId INTEGER NOT NULL REFERENCES person(personId), accountId INTEGER NOT NULL REFERENCES account(accountId), stockId INTEGER NOT NULL REFERENCES stock(stockId), qty INTEGER NOT NULL, qtyFactor INTEGER NOT NULL DEFAULT 1, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (personId, accountId, stockId) );CREATE TABLE IF NOT EXISTS trade( tradeId INTEGER PRIMARY KEY, positionId INTEGER NOT NULL REFERENCES position(positionId), seq INTEGER NOT NULL, date TEXT NOT NULL, qty INTEGER, qtyFactor INTEGER, cost INTEGER, costFactor INTEGER, gain INTEGER, gainFactor INTEGER, notes TEXT, source TEXT, updated TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (positionId, seq) );CREATE VIEW IF NOT EXISTS stock_view AS SELECT s.stockId AS stockId, s.ticker AS ticker, s.name AS name, s.incomeType AS incomeType, s.notes AS notes, CAST (d.dividend AS REAL) / CAST (d.dividendFactor AS REAL) AS dividend, CAST (p.price AS REAL) / CAST (p.priceFactor AS REAL) AS price, CAST (d.dividend * p.priceFactor AS REAL) / CAST (p.price * d.dividendFactor AS REAL) AS yield FROM stock s LEFT JOIN stock_dividend d USING (stockId) LEFT JOIN stock_price p USING (stockId) ORDER BY ticker;CREATE VIEW IF NOT EXISTS position_view AS SELECT p.positionId AS positionId, s.ticker AS ticker, a.name AS account, w.name AS person, CAST (p.qty AS REAL) / CAST (p.qtyFactor AS REAL) AS qty, round(p.qty * s.price, 2) AS value, round(p.qty * s.dividend, 2) AS income FROM position p INNER JOIN stock_view s USING (stockId) INNER JOIN account a USING (accountId) INNER JOIN person w USING (personId) WHERE qty != 0 ORDER BY ticker, account, person;CREATE VIEW IF NOT EXISTS trade_view AS SELECT t.tradeId AS tradeId, s.ticker AS ticker, a.name AS account, w.name AS person, t.date AS date, CAST (t.qty AS REAL) / CAST (t.qtyFactor AS REAL) AS qty, round(CAST (t.cost AS REAL) / CAST (t.costFactor AS REAL), 2) AS cost, round(CAST (t.gain AS REAL) / CAST (t.gainFactor AS REAL), 2) AS gain, t.notes AS notes FROM trade t, position p, account a, person w, stock s WHERE t.positionId = p.positionId AND p.accountId = a.accountId AND p.personId = w.personId AND p.stockId = s.stockId ORDER BY ticker, account, person, t.seq");
-const deleteTrades=SQL.from("DELETE FROM trade WHERE qty IS NULL AND cost IS NULL AND gain IS NULL");
-const insertDividend=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT INTO stock_dividend ( stockId, dividend, dividendFactor, source ) SELECT stockId, $dividend, $dividendFactor, $source FROM stock WHERE ticker = $ticker AND $dividend IS NOT NULL ON CONFLICT DO UPDATE SET dividend = excluded.dividend, dividendFactor = excluded.dividendFactor, source = excluded.source;DELETE FROM stock_dividend WHERE stockId IN ( SELECT stockId FROM stock WHERE ticker = $ticker) AND $dividend IS NULL");
-const insertPosition=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT OR IGNORE INTO person (name) VALUES ($person);INSERT OR IGNORE INTO account (name) VALUES ($account);INSERT INTO position ( personId, accountId, stockId, qty, qtyFactor, source ) SELECT p.personId, a.accountId, s.stockId, $qty, $qtyFactor, $source FROM person p, account a, stock s WHERE p.name = $person AND a.name = $account AND s.ticker = $ticker  ON CONFLICT DO UPDATE SET qty = excluded.qty, qtyFactor = excluded.qtyFactor, source = excluded.source, updated = excluded.updated");
-const insertPrice=SQL.from("INSERT OR IGNORE INTO stock(ticker) VALUES ($ticker);UPDATE stock SET name = $name WHERE ticker = $ticker AND name IS NULL;INSERT INTO stock_price ( stockId, price, priceFactor, source ) SELECT stockId, $price, $priceFactor, $source FROM stock WHERE ticker = $ticker ON CONFLICT DO UPDATE SET price = excluded.price, priceFactor = excluded.priceFactor, source = excluded.source");
-const insertStock=SQL.from("INSERT INTO stock (ticker, name, incomeType, notes, source) VALUES ($ticker, $name, $incomeType, $notes, $source) ON CONFLICT DO UPDATE SET name = excluded.name, incomeType = excluded.incomeType, notes = excluded.notes, source = excluded.source, updated = excluded.updated");
-const insertTrade=SQL.from("INSERT OR IGNORE INTO stock (ticker) VALUES ($ticker);INSERT OR IGNORE INTO person (name) VALUES ($person);INSERT OR IGNORE INTO account (name) VALUES ($account);INSERT OR IGNORE INTO position ( personId, accountId, stockId, qty, qtyFactor ) SELECT w.personId, a.accountId, s.stockId, 0, 1 FROM person w, account a, stock s WHERE w.name = $person AND a.name = $account AND s.ticker = $ticker;INSERT INTO trade ( positionId, seq, date, qty, qtyFactor, cost, costFactor, gain, gainFactor, notes, source ) SELECT p.positionId, $seq, $date, $qty, $qtyFactor, $cost, $costFactor, $gain, $gainFactor, $notes, $source FROM position p INNER JOIN person w USING (personId) INNER JOIN account a USING (accountId) INNER JOIN stock s USING (stockId) WHERE s.ticker = $ticker AND a.name = $account AND w.name = $person  ON CONFLICT DO UPDATE SET date = excluded.date, qty = excluded.qty, qtyFactor = excluded.qtyFactor, cost = excluded.cost, costFactor = excluded.costFactor, gain = excluded.gain, gainFactor = excluded.gainFactor, notes = excluded.notes, source = excluded.source, updated = excluded.updated");
-const selectActiveStocks$1=SQL.from("SELECT ticker from stock WHERE stockId IN ( SELECT stockId FROM stock_dividend UNION SELECT stockId FROM position WHERE qty != 0 )");
-const selectPositionSheet$1=SQL.from("SELECT p.ticker AS ticker, p.person AS person, p.account AS account, p.qty AS qty, p.value AS value, p.income AS income, s.price AS price, s.dividend AS dividend, s.yield AS yield  FROM position_view p, stock_view s  WHERE p.ticker = s.ticker  ORDER BY ticker, person, account");
-const selectStockSheet$1=SQL.from("SELECT ticker, incomeType, name, price, dividend, notes  FROM stock_view  ORDER BY ticker");
-const selectTradeSheet$1=SQL.from("SELECT person, account, ticker, date, qty, cost, gain  FROM trade_view  ORDER BY person, account, ticker, tradeId");
-
-let opened;
-
-const DB_VERSION = 2;
-
-function open () {
-  if (opened) return
-  opened = true;
-
-  const dbFile = process.env.DB || join(homedir(), '.databases', 'findb.sqlite');
-  const db = new SQLite(dbFile);
-  SQL.attach(db);
-  ddl.run();
-  const version = db
-    .prepare('select version from dbversion')
-    .pluck()
-    .get();
-  if (version !== DB_VERSION) {
-    throw new Error('Wrong version of db: ' + dbFile)
-  }
-}
-
-const insertStocks = SQL.transaction(stocks => {
-  for (const { ticker, name, incomeType, notes, source } of stocks) {
-    insertStock.run({
-      ticker,
-      name,
-      incomeType: incomeType || null,
-      notes: notes || null,
-      source
-    });
-  }
-});
-
-const insertPrices = SQL.transaction(prices => {
-  for (const { ticker, name, price, source } of prices) {
-    insertPrice.run({
-      ticker,
-      name,
-      price: price.digits,
-      priceFactor: price.factor,
-      source
-    });
-  }
-  clearOldPrices.run(7);
-});
-
-const insertDividends = SQL.transaction(divs => {
-  for (const { ticker, dividend, source } of divs) {
-    insertDividend.run({
-      ticker,
-      dividend: dividend ? dividend.digits : null,
-      dividendFactor: dividend ? dividend.factor : null,
-      source
-    });
-  }
-  clearOldDividends.run(7);
-});
-
-const insertPositions = SQL.transaction(positions => {
-  clearPositions.run();
-  for (const { ticker, person, account, qty, source } of positions) {
-    insertPosition.run({
-      ticker,
-      person,
-      account,
-      qty: qty ? qty.digits : 0,
-      qtyFactor: qty ? qty.factor : 1,
-      source
-    });
-  }
-});
-
-const insertTrades = SQL.transaction((account, trades) => {
-  clearTrades.run(account);
-  for (const trade of trades) {
-    const {
-      ticker,
-      account,
-      person,
-      seq,
-      date,
-      qty,
-      cost,
-      gain,
-      notes,
-      source
-    } = trade;
-    insertTrade.run({
-      ticker,
-      account,
-      person,
-      seq,
-      date,
-      qty: qty ? qty.digits : null,
-      qtyFactor: qty ? qty.factor : null,
-      cost: cost ? cost.digits : null,
-      costFactor: cost ? cost.factor : null,
-      gain: gain ? gain.digits : null,
-      gainFactor: gain ? gain.factor : null,
-      notes: notes || null,
-      source
-    });
-  }
-  deleteTrades.run();
-});
-
-function selectActiveStocks () {
-  return selectActiveStocks$1.pluck().all()
-}
-
-function selectPositionSheet () {
-  return selectPositionSheet$1.all()
-}
-
-function selectTradeSheet () {
-  return selectTradeSheet$1.all()
-}
-
-function selectStockSheet () {
-  return selectStockSheet$1.all()
 }
 
 const allColours = (
@@ -473,6 +271,443 @@ function once (fn) {
 
   return f
 }
+
+function tidy (sql) {
+  return sql
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => !line.startsWith('--'))
+    .map(line => line.replaceAll(/  +/g, ' '))
+    .filter(Boolean)
+    .join(' ')
+    .trim()
+    .replaceAll(/; */g, ';')
+    .replace(/;$/, '')
+}
+
+function statement (stmt, opts = {}) {
+  const { pluck, all, get, db } = opts;
+  function exec (...args) {
+    args = args.map(arg => {
+      if (!arg || typeof arg !== 'object') return arg
+      return Object.fromEntries(
+        Object.entries(arg).map(([k, v]) => [
+          k,
+          v instanceof Date ? v.toISOString() : v
+        ])
+      )
+    });
+    if (stmt.includes(';')) return db().exec(stmt)
+    let prep = prepare(stmt, db);
+    if (pluck) prep = prep.pluck();
+    if (all) return prep.all(...args)
+    if (get) return prep.get(...args)
+    return prep.run(...args)
+  }
+  return Object.defineProperties(exec, {
+    pluck: { value: () => statement(stmt, { ...opts, pluck: true }) },
+    get: { get: () => statement(stmt, { ...opts, get: true }) },
+    all: { get: () => statement(stmt, { ...opts, all: true }) }
+  })
+}
+
+function transaction (_fn, db) {
+  let fn;
+  return (...args) => {
+    if (!fn) fn = db().transaction(_fn);
+    return fn(...args)
+  }
+}
+
+const cache = new Map();
+function prepare (stmt, db) {
+  let p = cache.get(stmt);
+  if (p) return p
+  p = db().prepare(stmt);
+  cache.set(stmt, p);
+  return p
+}
+
+const DB_VERSION = 2;
+
+const db = once(() => {
+  const dbFile = process.env.DB || join(homedir(), '.databases', 'findb.sqlite');
+  const db = new SQLite(dbFile);
+  db.exec(ddl);
+  const version = db
+    .prepare('select version from dbversion')
+    .pluck()
+    .get();
+  if (version !== DB_VERSION) {
+    throw new Error('Wrong version of db: ' + dbFile)
+  }
+  return db
+});
+
+function sql (text) {
+  return statement(tidy(text), { db })
+}
+sql.transaction = fn => transaction(fn, db);
+
+const ddl = tidy(`
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = TRUE;
+
+BEGIN TRANSACTION;
+
+CREATE VIEW IF NOT EXISTS dbversion AS
+    SELECT 2 AS version;
+
+---- Stock static data -----------------
+
+CREATE TABLE IF NOT EXISTS stock(
+    stockId INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL UNIQUE,
+    name TEXT,
+    incomeType TEXT,
+    notes TEXT,
+    source TEXT,
+    updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIEW IF NOT EXISTS stock_v AS
+  SELECT ticker, name, incomeType, notes, source
+  FROM stock;
+
+CREATE TRIGGER IF NOT EXISTS stock_vi
+  INSTEAD OF INSERT ON stock_v
+BEGIN
+    INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+
+    UPDATE stock
+    SET   (name, incomeType, notes, source) =
+            (NEW.name, NEW.incomeType, NEW.notes, NEW.source),
+          updated = datetime('now')
+    WHERE ticker = NEW.ticker;
+END;
+
+---- Stock dividends -------------------
+
+CREATE TABLE IF NOT EXISTS stock_dividend(
+    stockId INTEGER PRIMARY KEY REFERENCES stock(stockId),
+    dividend INTEGER NOT NULL,
+    dividendFactor INTEGER NOT NULL DEFAULT 1,
+    source TEXT,
+    updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIEW IF NOT EXISTS stock_dividend_v AS
+  SELECT  s.ticker AS ticker,
+          d.dividend AS dividend,
+          d.dividendFactor AS dividendFactor,
+          d.source AS source
+  FROM    stock_dividend d
+  JOIN    stock s USING (stockId);
+
+CREATE TRIGGER IF NOT EXISTS stock_dividend_vi
+  INSTEAD OF INSERT ON stock_dividend_v
+BEGIN
+  INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+  INSERT INTO stock_dividend
+    (stockId, dividend, dividendFactor, source)
+    SELECT stockId,
+           NEW.dividend,
+           NEW.dividendFactor,
+           NEW.source
+    FROM   stock
+    WHERE  ticker = NEW.ticker
+    AND    NEW.dividend IS NOT NULL
+  ON CONFLICT DO UPDATE
+    SET dividend       = excluded.dividend,
+        dividendFactor = excluded.dividendFactor,
+        source         = excluded.source,
+        updated        = excluded.updated;
+  DELETE FROM stock_dividend
+    WHERE stockId IN
+          ( SELECT stockId FROM stock
+            WHERE ticker = NEW.ticker)
+    AND   NEW.dividend IS NULL;
+END;
+
+---- Stock prices ----------------------
+
+CREATE TABLE IF NOT EXISTS stock_price(
+    stockId INTEGER PRIMARY KEY REFERENCES stock(stockId),
+    price INTEGER NOT NULL,
+    priceFactor INTEGER NOT NULL,
+    source TEXT,
+    updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIEW IF NOT EXISTS stock_price_v AS
+  SELECT s.ticker      AS ticker,
+         s.name        AS name,
+         r.price       AS price,
+         r.priceFactor AS priceFactor,
+         r.source      AS source
+  FROM   stock_price r
+  JOIN   stock s USING (stockId);
+
+CREATE TRIGGER IF NOT EXISTS stock_price_vi
+  INSTEAD OF INSERT ON stock_price_v
+BEGIN
+  INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+  UPDATE stock
+    SET   name = NEW.name
+    WHERE ticker = NEW.ticker
+    AND   name IS NULL;
+  INSERT INTO stock_price
+    (stockId, price, priceFactor, source)
+    SELECT stockId,
+           NEW.price,
+           NEW.priceFactor,
+           NEW.source
+    FROM   stock
+    WHERE  ticker = NEW.ticker
+  ON CONFLICT DO UPDATE
+    SET price       = excluded.price,
+        priceFactor = excluded.priceFactor,
+        source      = excluded.source,
+        updated     = excluded.updated;
+END;
+
+---- Account and person ----------------
+
+CREATE TABLE IF NOT EXISTS account(
+    accountId INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO account
+    (name)
+VALUES
+    ('Dealing'),
+    ('ISA'),
+    ('SIPP'),
+    ('SIPP2');
+
+CREATE TABLE IF NOT EXISTS person(
+    personId INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO person
+    (name)
+VALUES
+    ('AJL'),
+    ('RSGG');
+
+---- Positions -------------------------
+
+CREATE TABLE IF NOT EXISTS position(
+    positionId INTEGER PRIMARY KEY,
+    personId INTEGER NOT NULL REFERENCES person(personId),
+    accountId INTEGER NOT NULL REFERENCES account(accountId),
+    stockId INTEGER NOT NULL REFERENCES stock(stockId),
+    qty INTEGER NOT NULL,
+    qtyFactor INTEGER NOT NULL DEFAULT 1,
+    source TEXT,
+    updated TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (personId, accountId, stockId)
+);
+
+CREATE INDEX IF NOT EXISTS position_i1 ON position
+  (personId);
+CREATE INDEX IF NOT EXISTS position_i2 ON position
+  (accountId);
+CREATE INDEX IF NOT EXISTS position_i3 ON position
+  (stockId);
+
+CREATE VIEW IF NOT EXISTS position_v AS
+  SELECT w.name AS person,
+         a.name AS account,
+         s.ticker AS ticker,
+         p.qty AS qty,
+         p.qtyFactor AS qtyFactor,
+         p.source AS source
+  FROM   position p
+  JOIN   person w USING (personId)
+  JOIN   account a USING (accountId)
+  JOIN   stock s USING (stockId);
+
+CREATE TRIGGER IF NOT EXISTS position_vi
+  INSTEAD OF INSERT ON position_v
+BEGIN
+  INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+  INSERT OR IGNORE INTO account (name)
+    VALUES (NEW.account);
+  INSERT OR IGNORE INTO person (name)
+    VALUES (NEW.person);
+  INSERT INTO position
+    (personId, accountId, stockId, qty, qtyFactor, source)
+    SELECT w.personId,
+           a.accountId,
+           s.stockId,
+           NEW.qty,
+           NEW.qtyFactor,
+           NEW.source
+    FROM   person w, account a, stock s
+    WHERE  w.name = NEW.person
+    AND    a.name = NEW.account
+    AND    s.ticker = NEW.ticker
+  ON CONFLICT DO UPDATE
+    SET qty       = excluded.qty,
+        qtyFactor = excluded.qtyFactor,
+        source    = excluded.source,
+        updated   = excluded.updated;
+END;
+
+---- Trades ----------------------------
+
+CREATE TABLE IF NOT EXISTS trade(
+    tradeId INTEGER PRIMARY KEY,
+    positionId INTEGER NOT NULL REFERENCES position(positionId),
+    seq INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    qty INTEGER,
+    qtyFactor INTEGER,
+    cost INTEGER,
+    costFactor INTEGER,
+    gain INTEGER,
+    gainFactor INTEGER,
+    notes TEXT,
+    source TEXT,
+    updated TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (positionId, seq)
+);
+
+CREATE VIEW IF NOT EXISTS trade_v AS
+  SELECT  w.name AS person,
+          a.name AS account,
+          s.ticker AS ticker,
+          t.seq AS seq,
+          t.date AS date,
+          t.qty AS qty,
+          t.qtyFactor as qtyFactor,
+          t.cost AS cost,
+          t.costFactor AS costFactor,
+          t.gain AS gain,
+          t.gainFactor AS gainFactor,
+          t.notes AS notes,
+          t.source AS source
+  FROM    trade t
+  JOIN    position p USING (positionId)
+  JOIN    account a ON a.accountId = p.accountId
+  JOIN    person w ON w.personId = p.personId
+  JOIN    stock s ON s.stockId = p.stockId;
+
+CREATE TRIGGER IF NOT EXISTS trade_vi
+  INSTEAD OF INSERT ON trade_v
+BEGIN
+  INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+  INSERT OR IGNORE INTO person (name)
+    VALUES (NEW.person);
+  INSERT OR IGNORE INTO account (name)
+    VALUES (NEW.account);
+  INSERT OR IGNORE INTO position
+    (personId, accountId, stockId, qty, qtyFactor)
+    SELECT w.personId,
+           a.accountId,
+           s.stockId,
+           0,
+           1
+    FROM   person w, account a, stock s
+    WHERE  w.name   = NEW.person
+    AND    a.name   = NEW.account
+    AND    s.ticker = NEW.ticker;
+  INSERT INTO TRADE
+    (positionId, seq, date, qty, qtyFactor, cost, costFactor,
+      gain, gainFactor, notes, source)
+    SELECT  p.positionId, NEW.seq, NEW.date, NEW.qty, NEW.qtyFactor,
+              NEW.cost, NEW.costFactor, NEW.gain, NEW.gainFactor,
+              NEW.notes, NEW.source
+    FROM    position p
+    JOIN    person w USING (personId)
+    JOIN    account a USING (accountId)
+    JOIN    stock s USING (stockId)
+    WHERE   s.ticker = NEW.ticker
+    AND     a.name   = NEW.account
+    AND     w.name   = NEW.person
+  ON CONFLICT DO UPDATE
+    SET (date, qty, qtyFactor, cost, costFactor,
+          gain, gainFactor, notes, source)
+        = (NEW.date, NEW.qty, NEW.qtyFactor, NEW.cost, NEW.costFactor,
+            NEW.gain, NEW.gainFactor, NEW.notes, NEW.source),
+        updated = excluded.updated;
+END;
+
+---- Extract views ---------------------
+
+CREATE VIEW IF NOT EXISTS stock_view AS
+  SELECT
+        s.stockId       AS stockId,
+        s.ticker        AS ticker,
+        s.name          AS name,
+        s.incomeType    AS incomeType,
+        s.notes         AS notes,
+        CAST (d.dividend AS REAL) / 
+            CAST (d.dividendFactor AS REAL)
+                        AS dividend,
+        CAST (p.price AS REAL) /
+            CAST (p.priceFactor AS REAL)
+                        AS price,
+        CAST (d.dividend * p.priceFactor AS REAL) /
+            CAST (p.price * d.dividendFactor AS REAL)
+                        AS yield
+  FROM stock s
+  LEFT JOIN stock_dividend d USING (stockId)
+  LEFT JOIN stock_price p USING (stockId)
+  ORDER BY ticker;
+
+CREATE VIEW IF NOT EXISTS position_view AS
+  SELECT
+        p.positionId    AS positionId,
+        s.ticker        AS ticker,
+        a.name          AS account,
+        w.name          AS person,
+        CAST (p.qty AS REAL) / CAST (p.qtyFactor AS REAL)
+                        AS qty,
+        round(p.qty * s.price, 2)
+                        AS value,
+        round(p.qty * s.dividend, 2)
+                        AS income
+  FROM position p
+  INNER JOIN stock_view s USING (stockId)
+  INNER JOIN account a USING (accountId)
+  INNER JOIN person w USING (personId)
+  WHERE qty != 0
+  ORDER BY ticker, account, person;
+
+CREATE VIEW IF NOT EXISTS trade_view AS
+  SELECT
+    t.tradeId           AS tradeId,
+    s.ticker            AS ticker,
+    a.name              AS account,
+    w.name              AS person,
+    t.date              AS date,
+    CAST (t.qty AS REAL) / CAST (t.qtyFactor AS REAL)
+                        AS qty,
+    round(CAST (t.cost AS REAL) / CAST (t.costFactor AS REAL), 2)
+                        AS cost,
+    round(CAST (t.gain AS REAL) / CAST (t.gainFactor AS REAL), 2)
+                        AS gain,
+    t.notes             AS notes
+  FROM  trade t,
+        position p,
+        account a,
+        person w,
+        stock s
+  WHERE t.positionId    = p.positionId
+  AND   p.accountId     = a.accountId
+  AND   p.personId      = w.personId
+  AND   p.stockId       = s.stockId
+  ORDER BY ticker, account, person, t.seq;
+
+COMMIT;
+`);
 
 const epochStartInSerial = 25569;
 const msInDay = 24 * 60 * 60 * 1000;
@@ -716,6 +951,21 @@ async function importStocks (opts) {
   debug$7('Loaded %d records from stocks', data.length);
 }
 
+const insertStock = sql(`
+INSERT INTO stock_v
+    (ticker, name, incomeType, notes, source)
+VALUES
+    ($ticker, $name, $incomeType, $notes, $source)
+`);
+
+const insertStocks = sql.transaction(stocks => {
+  for (const stock of stocks) {
+    stock.incomeType = stock.incomeType || null;
+    stock.notes = stock.notes || null;
+    insertStock(stock);
+  }
+});
+
 var RGX = /([^{]*?)\w(?=\})/g;
 
 var MAP = {
@@ -935,6 +1185,21 @@ function importDate (x) {
   return typeof x === 'number' ? plainDateString(toDate(x)) : undefined
 }
 
+function expandDecimal (o, ...keys) {
+  keys = new Set(keys);
+  const ret = {};
+  for (const k in o) {
+    if (keys.has(k)) {
+      const v = o[k];
+      ret[k] = v ? v.digits : null;
+      ret[k + 'Factor'] = v ? v.factor : null;
+    } else {
+      ret[k] = o[k];
+    }
+  }
+  return ret
+}
+
 const debug$6 = log
   .prefix('import:portfolio:')
   .colour()
@@ -1002,6 +1267,40 @@ async function importPositions (rangeData, opts) {
 
   debug$6('%d positions updated', updates.length);
 }
+
+const insertDividends = sql.transaction(divs => {
+  for (let div of divs) {
+    div = expandDecimal(div, 'dividend');
+    insertDividend(div);
+  }
+});
+
+const insertDividend = sql(`
+  INSERT INTO stock_dividend_v (ticker, dividend, dividendFactor, source)
+    VALUES ($ticker, $dividend, $dividendFactor, $source)
+`);
+
+const insertPositions = sql.transaction(posns => {
+  clearPositions();
+  for (let pos of posns) {
+    pos = expandDecimal(pos, 'qty');
+    pos.qty = pos.qty || 0;
+    pos.qtyFactor = pos.qtyFactor || 1;
+    insertPosition(pos);
+  }
+});
+
+const clearPositions = sql(`
+  UPDATE position
+    SET   (qty, qtyFactor, source, updated) =
+            (0, 1, NULL, datetime('now'))
+    WHERE qty != 0
+`);
+
+const insertPosition = sql(`
+  INSERT INTO position_v (person, account, ticker, qty, qtyFactor, source)
+    VALUES ($person, $account, $ticker, $qty, $qtyFactor, $source)
+`);
 
 function sortBy (name, desc) {
   const fn = typeof name === 'function' ? name : x => x[name];
@@ -1137,6 +1436,42 @@ function buildPosition () {
     }
   }
 }
+
+const clearTrades = sql(`
+ UPDATE trade
+  SET (qty, cost, gain) = (NULL, NULL, NULL)
+  WHERE positionId IN (
+    SELECT positionId FROM position
+    WHERE  accountId IN (
+      SELECT accountId FROM account
+      WHERE  name = $account
+    )
+  )
+`);
+
+const insertTrade = sql(`
+  INSERT INTO trade_v
+    (person, account, ticker, seq, date, qty, qtyFactor,
+      cost, costFactor, gain, gainFactor, notes, source)
+  VALUES
+    ($person, $account, $ticker, $seq, $date, $qty, $qtyFactor,
+      $cost, $costFactor, $gain, $gainFactor, $notes, $source)
+`);
+
+const deleteTrades = sql(`
+  DELETE FROM trade
+  WHERE (qty, cost, gain) IS (NULL, NULL, NULL)
+`);
+
+const insertTrades = sql.transaction((account, trades) => {
+  clearTrades({ account });
+  for (let trade of trades) {
+    trade = { qty: null, cost: null, gain: null, notes: null, ...trade };
+    trade = expandDecimal(trade, 'qty', 'cost', 'gain');
+    insertTrade(trade);
+  }
+  deleteTrades();
+});
 
 function sleep (ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -1565,6 +1900,35 @@ async function * getPrices (tickers) {
   debug$3('%d prices individually: %s', needed.size, [...needed].join(', '));
 }
 
+const selectActiveStocks = sql(`
+  SELECT ticker FROM stock
+  WHERE stockId IN (
+    SELECT stockId FROM stock_dividend
+    UNION
+    SELECT stockId FROM position
+    WHERE qty != 0
+  )
+`).pluck().all;
+
+const clearOldPrices = sql(`
+  DELETE FROM stock_price
+    WHERE updated < datetime('now', '-' || $days || ' days');
+`);
+
+const insertPrice = sql(`
+  INSERT INTO stock_price_v
+    (ticker, name, price, priceFactor, source)
+  VALUES
+    ($ticker, $name, $price, $priceFactor, $source)
+`);
+
+const insertPrices = sql.transaction(prices => {
+  for (const price of prices) {
+    insertPrice(expandDecimal(price, 'price'));
+  }
+  clearOldPrices({ days: 7 });
+});
+
 const debug$2 = log
   .prefix('export:positions:')
   .colour()
@@ -1603,6 +1967,22 @@ function makePositionRow ({
     income || 0
   ]
 }
+
+const selectPositionSheet = sql(`
+  SELECT
+    p.ticker    AS ticker,
+    p.person    AS person,
+    p.account   AS account,
+    p.qty       AS qty,
+    p.value     AS value,
+    p.income    AS income,
+    s.price     AS price,
+    s.dividend  AS dividend,
+    s.yield     AS yield
+  FROM  position_view p
+  JOIN  stock_view s USING (ticker)
+  ORDER BY ticker, person, account
+`).all;
 
 function makeCSV (arr) {
   return (
@@ -1649,6 +2029,12 @@ function makeTradeRow (t) {
     t.gain || 0
   ]
 }
+
+const selectTradeSheet = sql(`
+  SELECT  person, account, ticker, date, qty, cost, gain
+  FROM    trade_view
+  ORDER BY person, account, ticker, tradeId
+`).all;
 
 function speedo ({
   total,
@@ -1881,8 +2267,13 @@ function stockToRow (row) {
   ]
 }
 
+const selectStockSheet = sql(`
+  SELECT  ticker, incomeType, name, price, dividend, notes
+  FROM    stock_view
+  ORDER BY ticker
+`).all;
+
 async function main (opts) {
-  open();
   const cmds = opts._;
   while (cmds.length) {
     const cmd = cmds.shift();
@@ -1918,7 +2309,7 @@ function bail (err) {
   process.exit(2);
 }
 
-const version = '1.2.1';
+const version = '1.2.2';
 const opts = mri(process.argv.slice(2), {
   alias: {
     help: 'h',
