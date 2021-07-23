@@ -1,7 +1,7 @@
 import log from 'logjs'
 
 import { sql } from '../db/index.mjs'
-import { expandDecimal } from '../import/util.mjs'
+import { convertDecimal } from '../import/util.mjs'
 import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
 
 const debug = log
@@ -55,7 +55,7 @@ const selectActiveStocks = sql(`
     SELECT stockId FROM stock_dividend
     UNION
     SELECT stockId FROM position
-    WHERE qty != 0
+    WHERE qty != '0'
   )
 `).pluck().all
 
@@ -66,14 +66,14 @@ const clearOldPrices = sql(`
 
 const insertPrice = sql(`
   INSERT INTO stock_price_v
-    (ticker, name, price, priceFactor, source)
+    (ticker, name, price, source)
   VALUES
-    ($ticker, $name, $price, $priceFactor, $source)
+    ($ticker, $name, $price, $source)
 `)
 
 const insertPrices = sql.transaction(prices => {
   for (const price of prices) {
-    insertPrice(expandDecimal(price, 'price'))
+    insertPrice(convertDecimal(price))
   }
   clearOldPrices({ days: 7 })
 })

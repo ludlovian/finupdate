@@ -7,7 +7,7 @@ import once from 'pixutil/once'
 
 import { tidy, statement, transaction } from './util.mjs'
 
-const DB_VERSION = 2
+const DB_VERSION = 3
 
 const db = once(() => {
   const dbFile = process.env.DB || join(homedir(), '.databases', 'findb.sqlite')
@@ -35,7 +35,7 @@ PRAGMA foreign_keys = TRUE;
 BEGIN TRANSACTION;
 
 CREATE VIEW IF NOT EXISTS dbversion AS
-    SELECT 2 AS version;
+    SELECT 3 AS version;
 
 ---- Stock static data -----------------
 
@@ -70,8 +70,7 @@ END;
 
 CREATE TABLE IF NOT EXISTS stock_dividend(
     stockId INTEGER PRIMARY KEY REFERENCES stock(stockId),
-    dividend INTEGER NOT NULL,
-    dividendFactor INTEGER NOT NULL DEFAULT 1,
+    dividend TEXT NOT NULL,
     source TEXT,
     updated TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -79,7 +78,6 @@ CREATE TABLE IF NOT EXISTS stock_dividend(
 CREATE VIEW IF NOT EXISTS stock_dividend_v AS
   SELECT  s.ticker AS ticker,
           d.dividend AS dividend,
-          d.dividendFactor AS dividendFactor,
           d.source AS source
   FROM    stock_dividend d
   JOIN    stock s USING (stockId);
@@ -90,17 +88,15 @@ BEGIN
   INSERT OR IGNORE INTO stock (ticker)
     VALUES (NEW.ticker);
   INSERT INTO stock_dividend
-    (stockId, dividend, dividendFactor, source)
+    (stockId, dividend, source)
     SELECT stockId,
            NEW.dividend,
-           NEW.dividendFactor,
            NEW.source
     FROM   stock
     WHERE  ticker = NEW.ticker
     AND    NEW.dividend IS NOT NULL
-  ON CONFLICT DO UPDATE
+  ON CONFLICT(stockId) DO UPDATE
     SET dividend       = excluded.dividend,
-        dividendFactor = excluded.dividendFactor,
         source         = excluded.source,
         updated        = excluded.updated;
   DELETE FROM stock_dividend
@@ -114,8 +110,7 @@ END;
 
 CREATE TABLE IF NOT EXISTS stock_price(
     stockId INTEGER PRIMARY KEY REFERENCES stock(stockId),
-    price INTEGER NOT NULL,
-    priceFactor INTEGER NOT NULL,
+    price TEXT NOT NULL,
     source TEXT,
     updated TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -124,7 +119,6 @@ CREATE VIEW IF NOT EXISTS stock_price_v AS
   SELECT s.ticker      AS ticker,
          s.name        AS name,
          r.price       AS price,
-         r.priceFactor AS priceFactor,
          r.source      AS source
   FROM   stock_price r
   JOIN   stock s USING (stockId);
@@ -139,16 +133,14 @@ BEGIN
     WHERE ticker = NEW.ticker
     AND   name IS NULL;
   INSERT INTO stock_price
-    (stockId, price, priceFactor, source)
+    (stockId, price, source)
     SELECT stockId,
            NEW.price,
-           NEW.priceFactor,
            NEW.source
     FROM   stock
     WHERE  ticker = NEW.ticker
-  ON CONFLICT DO UPDATE
+  ON CONFLICT(stockId) DO UPDATE
     SET price       = excluded.price,
-        priceFactor = excluded.priceFactor,
         source      = excluded.source,
         updated     = excluded.updated;
 END;
@@ -184,8 +176,7 @@ CREATE TABLE IF NOT EXISTS position(
     personId INTEGER NOT NULL REFERENCES person(personId),
     accountId INTEGER NOT NULL REFERENCES account(accountId),
     stockId INTEGER NOT NULL REFERENCES stock(stockId),
-    qty INTEGER NOT NULL,
-    qtyFactor INTEGER NOT NULL DEFAULT 1,
+    qty TEXT NOT NULL,
     source TEXT,
     updated TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (personId, accountId, stockId)
@@ -203,7 +194,6 @@ CREATE VIEW IF NOT EXISTS position_v AS
          a.name AS account,
          s.ticker AS ticker,
          p.qty AS qty,
-         p.qtyFactor AS qtyFactor,
          p.source AS source
   FROM   position p
   JOIN   person w USING (personId)
@@ -220,20 +210,18 @@ BEGIN
   INSERT OR IGNORE INTO person (name)
     VALUES (NEW.person);
   INSERT INTO position
-    (personId, accountId, stockId, qty, qtyFactor, source)
+    (personId, accountId, stockId, qty, source)
     SELECT w.personId,
            a.accountId,
            s.stockId,
            NEW.qty,
-           NEW.qtyFactor,
            NEW.source
     FROM   person w, account a, stock s
     WHERE  w.name = NEW.person
     AND    a.name = NEW.account
     AND    s.ticker = NEW.ticker
-  ON CONFLICT DO UPDATE
+  ON CONFLICT(personId, accountId, stockId) DO UPDATE
     SET qty       = excluded.qty,
-        qtyFactor = excluded.qtyFactor,
         source    = excluded.source,
         updated   = excluded.updated;
 END;
@@ -245,17 +233,17 @@ CREATE TABLE IF NOT EXISTS trade(
     positionId INTEGER NOT NULL REFERENCES position(positionId),
     seq INTEGER NOT NULL,
     date TEXT NOT NULL,
-    qty INTEGER,
-    qtyFactor INTEGER,
-    cost INTEGER,
-    costFactor INTEGER,
-    gain INTEGER,
-    gainFactor INTEGER,
+    qty TEXT,
+    cost TEXT,
+    gain TEXT,
     notes TEXT,
     source TEXT,
     updated TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (positionId, seq)
 );
+
+CREATE INDEX IF NOT EXISTS trade_i1 ON trade
+  (positionId);
 
 CREATE VIEW IF NOT EXISTS trade_v AS
   SELECT  w.name AS person,
@@ -264,11 +252,8 @@ CREATE VIEW IF NOT EXISTS trade_v AS
           t.seq AS seq,
           t.date AS date,
           t.qty AS qty,
-          t.qtyFactor as qtyFactor,
           t.cost AS cost,
-          t.costFactor AS costFactor,
           t.gain AS gain,
-          t.gainFactor AS gainFactor,
           t.notes AS notes,
           t.source AS source
   FROM    trade t
@@ -287,21 +272,18 @@ BEGIN
   INSERT OR IGNORE INTO account (name)
     VALUES (NEW.account);
   INSERT OR IGNORE INTO position
-    (personId, accountId, stockId, qty, qtyFactor)
+    (personId, accountId, stockId, qty)
     SELECT w.personId,
            a.accountId,
            s.stockId,
-           0,
-           1
+           '0'
     FROM   person w, account a, stock s
     WHERE  w.name   = NEW.person
     AND    a.name   = NEW.account
     AND    s.ticker = NEW.ticker;
   INSERT INTO TRADE
-    (positionId, seq, date, qty, qtyFactor, cost, costFactor,
-      gain, gainFactor, notes, source)
-    SELECT  p.positionId, NEW.seq, NEW.date, NEW.qty, NEW.qtyFactor,
-              NEW.cost, NEW.costFactor, NEW.gain, NEW.gainFactor,
+    (positionId, seq, date, qty, cost, gain, notes, source)
+    SELECT  p.positionId, NEW.seq, NEW.date, NEW.qty, NEW.cost, NEW.gain,
               NEW.notes, NEW.source
     FROM    position p
     JOIN    person w USING (personId)
@@ -310,11 +292,9 @@ BEGIN
     WHERE   s.ticker = NEW.ticker
     AND     a.name   = NEW.account
     AND     w.name   = NEW.person
-  ON CONFLICT DO UPDATE
-    SET (date, qty, qtyFactor, cost, costFactor,
-          gain, gainFactor, notes, source)
-        = (NEW.date, NEW.qty, NEW.qtyFactor, NEW.cost, NEW.costFactor,
-            NEW.gain, NEW.gainFactor, NEW.notes, NEW.source),
+  ON CONFLICT(positionId, seq) DO UPDATE
+    SET (date, qty, cost, gain, notes, source)
+        = (NEW.date, NEW.qty, NEW.cost, NEW.gain, NEW.notes, NEW.source),
         updated = excluded.updated;
 END;
 
@@ -327,14 +307,11 @@ CREATE VIEW IF NOT EXISTS stock_view AS
         s.name          AS name,
         s.incomeType    AS incomeType,
         s.notes         AS notes,
-        CAST (d.dividend AS REAL) / 
-            CAST (d.dividendFactor AS REAL)
+        CAST(d.dividend AS REAL)
                         AS dividend,
-        CAST (p.price AS REAL) /
-            CAST (p.priceFactor AS REAL)
+        CAST(p.price AS REAL)
                         AS price,
-        CAST (d.dividend * p.priceFactor AS REAL) /
-            CAST (p.price * d.dividendFactor AS REAL)
+        CAST(d.dividend AS REAL) / CAST(p.price AS REAL)
                         AS yield
   FROM stock s
   LEFT JOIN stock_dividend d USING (stockId)
@@ -347,17 +324,17 @@ CREATE VIEW IF NOT EXISTS position_view AS
         s.ticker        AS ticker,
         a.name          AS account,
         w.name          AS person,
-        CAST (p.qty AS REAL) / CAST (p.qtyFactor AS REAL)
+        CAST(p.qty AS NUMERIC)
                         AS qty,
-        round(p.qty * s.price, 2)
+        round(CAST(p.qty AS NUMERIC) * s.price, 2)
                         AS value,
-        round(p.qty * s.dividend, 2)
+        round(CAST(p.qty AS NUMERIC) * s.dividend, 2)
                         AS income
   FROM position p
   INNER JOIN stock_view s USING (stockId)
   INNER JOIN account a USING (accountId)
   INNER JOIN person w USING (personId)
-  WHERE qty != 0
+  WHERE qty != '0'
   ORDER BY ticker, account, person;
 
 CREATE VIEW IF NOT EXISTS trade_view AS
@@ -367,11 +344,10 @@ CREATE VIEW IF NOT EXISTS trade_view AS
     a.name              AS account,
     w.name              AS person,
     t.date              AS date,
-    CAST (t.qty AS REAL) / CAST (t.qtyFactor AS REAL)
-                        AS qty,
-    round(CAST (t.cost AS REAL) / CAST (t.costFactor AS REAL), 2)
+    CAST(t.qty AS REAL) AS qty,
+    round(CAST(t.cost AS REAL), 2)
                         AS cost,
-    round(CAST (t.gain AS REAL) / CAST (t.gainFactor AS REAL), 2)
+    round(CAST(t.gain AS REAL), 2)
                         AS gain,
     t.notes             AS notes
   FROM  trade t,

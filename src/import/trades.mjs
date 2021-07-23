@@ -4,7 +4,7 @@ import decimal from 'decimal'
 
 import { getSheetData } from '../sheets.mjs'
 import { sql } from '../db/index.mjs'
-import { importDate, importDecimal, expandDecimal } from './util.mjs'
+import { importDate, importDecimal, convertDecimal } from './util.mjs'
 
 const debug = log
   .prefix('import:trades:')
@@ -137,11 +137,11 @@ const clearTrades = sql(`
 
 const insertTrade = sql(`
   INSERT INTO trade_v
-    (person, account, ticker, seq, date, qty, qtyFactor,
-      cost, costFactor, gain, gainFactor, notes, source)
+    (person, account, ticker, seq,
+      date, qty, cost, gain, notes, source)
   VALUES
-    ($person, $account, $ticker, $seq, $date, $qty, $qtyFactor,
-      $cost, $costFactor, $gain, $gainFactor, $notes, $source)
+    ($person, $account, $ticker, $seq,
+      $date, $qty, $cost, $gain, $notes, $source)
 `)
 
 const deleteTrades = sql(`
@@ -152,8 +152,11 @@ const deleteTrades = sql(`
 const insertTrades = sql.transaction((account, trades) => {
   clearTrades({ account })
   for (let trade of trades) {
-    trade = { qty: null, cost: null, gain: null, notes: null, ...trade }
-    trade = expandDecimal(trade, 'qty', 'cost', 'gain')
+    trade = convertDecimal(trade)
+    trade.qty  = trade.qty || null
+    trade.cost  = trade.cost || null
+    trade.gain  = trade.gain || null
+    trade.notes  = trade.notes || null
     insertTrade(trade)
   }
   deleteTrades()

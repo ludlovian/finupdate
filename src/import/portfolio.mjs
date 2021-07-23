@@ -2,7 +2,7 @@ import log from 'logjs'
 
 import { getSheetData } from '../sheets.mjs'
 import { sql } from '../db/index.mjs'
-import { importDecimal, expandDecimal } from './util.mjs'
+import { importDecimal, convertDecimal } from './util.mjs'
 
 const debug = log
   .prefix('import:portfolio:')
@@ -74,34 +74,33 @@ async function importPositions (rangeData, opts) {
 
 const insertDividends = sql.transaction(divs => {
   for (let div of divs) {
-    div = expandDecimal(div, 'dividend')
+    div = convertDecimal(div)
     insertDividend(div)
   }
 })
 
 const insertDividend = sql(`
-  INSERT INTO stock_dividend_v (ticker, dividend, dividendFactor, source)
-    VALUES ($ticker, $dividend, $dividendFactor, $source)
+  INSERT INTO stock_dividend_v (ticker, dividend, source)
+    VALUES ($ticker, $dividend, $source)
 `)
 
 const insertPositions = sql.transaction(posns => {
   clearPositions()
   for (let pos of posns) {
-    pos = expandDecimal(pos, 'qty')
-    pos.qty = pos.qty || 0
-    pos.qtyFactor = pos.qtyFactor || 1
+    pos = convertDecimal(pos)
+    pos.qty = pos.qty || '0'
     insertPosition(pos)
   }
 })
 
 const clearPositions = sql(`
   UPDATE position
-    SET   (qty, qtyFactor, source, updated) =
-            (0, 1, NULL, datetime('now'))
-    WHERE qty != 0
+    SET   (qty, source, updated) =
+            ('0', NULL, datetime('now'))
+    WHERE qty != '0'
 `)
 
 const insertPosition = sql(`
-  INSERT INTO position_v (person, account, ticker, qty, qtyFactor, source)
-    VALUES ($person, $account, $ticker, $qty, $qtyFactor, $source)
+  INSERT INTO position_v (person, account, ticker, qty, source)
+    VALUES ($person, $account, $ticker, $qty, $source)
 `)

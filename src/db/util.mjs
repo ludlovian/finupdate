@@ -14,15 +14,7 @@ export function tidy (sql) {
 export function statement (stmt, opts = {}) {
   const { pluck, all, get, db } = opts
   function exec (...args) {
-    args = args.map(arg => {
-      if (!arg || typeof arg !== 'object') return arg
-      return Object.fromEntries(
-        Object.entries(arg).map(([k, v]) => [
-          k,
-          v instanceof Date ? v.toISOString() : v
-        ])
-      )
-    })
+    args = args.map(cleanArg)
     if (stmt.includes(';')) return db().exec(stmt)
     let prep = prepare(stmt, db)
     if (pluck) prep = prep.pluck()
@@ -35,6 +27,20 @@ export function statement (stmt, opts = {}) {
     get: { get: () => statement(stmt, { ...opts, get: true }) },
     all: { get: () => statement(stmt, { ...opts, all: true }) }
   })
+}
+
+function cleanArg (arg) {
+  if (!arg || typeof arg !== 'object') return arg
+  const ret = {}
+  for (const k in arg) {
+    const v = arg[k]
+    if (v instanceof Date) {
+      ret[k] = v.toISOString()
+    } else if (v !== undefined) {
+      ret[k] = v
+    }
+  }
+  return ret
 }
 
 export function transaction (_fn, db) {

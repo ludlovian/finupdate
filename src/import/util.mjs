@@ -16,17 +16,14 @@ export function importDate (x) {
   return typeof x === 'number' ? plainDateString(toDate(x)) : undefined
 }
 
-export function expandDecimal (o, ...keys) {
-  keys = new Set(keys)
-  const ret = {}
-  for (const k in o) {
-    if (keys.has(k)) {
-      const v = o[k]
-      ret[k] = v ? v.digits : null
-      ret[k + 'Factor'] = v ? v.factor : null
+export function convertDecimal (obj) {
+  const r = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (decimal.isDecimal(v)) {
+      r[k] = v.toString()
     } else {
-      ret[k] = o[k]
+      r[k] = v
     }
   }
-  return ret
+  return r
 }
