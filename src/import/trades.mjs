@@ -4,7 +4,13 @@ import decimal from 'decimal'
 
 import { getSheetData } from '../sheets.mjs'
 import { sql } from '../db/index.mjs'
-import { importDate, importDecimal, convertDecimal } from './util.mjs'
+import {
+  importDate,
+  importDecimal,
+  adjuster,
+  decimalAsString,
+  nullIfEmpty
+} from './util.mjs'
 
 const debug = log
   .prefix('import:trades:')
@@ -27,7 +33,6 @@ export default async function importTrades () {
     let seq = 0
     for (const trade of group) {
       trade.seq = ++seq
-      trade.source = 'sheets:trades'
       updates.push(trade)
     }
   }
@@ -151,13 +156,16 @@ const deleteTrades = sql(`
 
 const insertTrades = sql.transaction((account, trades) => {
   clearTrades({ account })
-  for (let trade of trades) {
-    trade = convertDecimal(trade)
-    trade.qty  = trade.qty || null
-    trade.cost  = trade.cost || null
-    trade.gain  = trade.gain || null
-    trade.notes  = trade.notes || null
-    insertTrade(trade)
+  const maybeDecimal = v => nullIfEmpty(decimalAsString(v))
+  const adj = adjuster({
+    qty: maybeDecimal,
+    cost: maybeDecimal,
+    gain: maybeDecimal,
+    notes: nullIfEmpty,
+    source: 'sheets:trades'
+  })
+  for (const trade of trades) {
+    insertTrade(adj(trade))
   }
   deleteTrades()
 })

@@ -2,6 +2,7 @@ import log from 'logjs'
 
 import { sql } from '../db/index.mjs'
 import { getSheetData } from '../sheets.mjs'
+import { adjuster, nullIfEmpty } from './util.mjs'
 
 const debug = log
   .prefix('import:stocks:')
@@ -27,7 +28,6 @@ export default async function importStocks (opts) {
     .map(rowAttribs)
     .map(validAttribs)
     .map(makeObject)
-    .map(o => ({ ...o, source: 'sheet:stocks' }))
 
   insertStocks(data)
 
@@ -42,9 +42,12 @@ VALUES
 `)
 
 const insertStocks = sql.transaction(stocks => {
+  const adj = adjuster({
+    incomeType: nullIfEmpty,
+    notes: nullIfEmpty,
+    source: 'sheet:stocks'
+  })
   for (const stock of stocks) {
-    stock.incomeType = stock.incomeType || null
-    stock.notes = stock.notes || null
-    insertStock(stock)
+    insertStock(adj(stock))
   }
 })

@@ -27,3 +27,25 @@ export function convertDecimal (obj) {
   }
   return r
 }
+
+export function nullIfEmpty (v) {
+  return v || null
+}
+
+export function decimalAsString (v) {
+  return decimal.isDecimal(v) ? v.toString() : v
+}
+
+export function adjuster (adjustments) {
+  return obj => {
+    obj = { ...obj }
+    for (const [k, fn] of Object.entries(adjustments)) {
+      if (typeof fn === 'function') {
+        obj[k] = fn(obj[k])
+      } else {
+        obj[k] = fn
+      }
+    }
+    return obj
+  }
+}

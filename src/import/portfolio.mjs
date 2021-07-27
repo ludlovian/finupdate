@@ -2,7 +2,12 @@ import log from 'logjs'
 
 import { getSheetData } from '../sheets.mjs'
 import { sql } from '../db/index.mjs'
-import { importDecimal, convertDecimal } from './util.mjs'
+import {
+  importDecimal,
+  adjuster,
+  nullIfEmpty,
+  decimalAsString
+} from './util.mjs'
 
 const debug = log
   .prefix('import:portfolio:')
@@ -33,11 +38,8 @@ export default async function importPortfolio () {
 async function importDividends (rangeData) {
   const extractData = row => [row[TICKER_COLUMN], row[DIV_COLUMN]]
   const validTicker = ([ticker]) => !!ticker
-  const makeObj = ([ticker, dividend]) => ({
-    ticker,
-    dividend: importDecimal(dividend),
-    source: 'sheets:portfolio'
-  })
+  const adj = adjuster({ dividend: importDecimal })
+  const makeObj = ([ticker, dividend]) => adj({ ticker, dividend })
 
   const data = rangeData
     .map(extractData)
@@ -65,7 +67,6 @@ async function importPositions (rangeData, opts) {
     .map(expandPositons)
     .flat(1)
     .filter(validPos)
-    .map(o => ({ ...o, source: 'sheets:portfolio' }))
 
   insertPositions(updates)
 
@@ -73,9 +74,12 @@ async function importPositions (rangeData, opts) {
 }
 
 const insertDividends = sql.transaction(divs => {
-  for (let div of divs) {
-    div = convertDecimal(div)
-    insertDividend(div)
+  const adj = adjuster({
+    dividend: v => nullIfEmpty(decimalAsString(v)),
+    source: 'sheets:portfolio'
+  })
+  for (const div of divs) {
+    insertDividend(adj(div))
   }
 })
 
@@ -86,10 +90,12 @@ const insertDividend = sql(`
 
 const insertPositions = sql.transaction(posns => {
   clearPositions()
-  for (let pos of posns) {
-    pos = convertDecimal(pos)
-    pos.qty = pos.qty || '0'
-    insertPosition(pos)
+  const adj = adjuster({
+    qty: v => decimalAsString(v) || '0',
+    source: 'sheets:portfolio'
+  })
+  for (const pos of posns) {
+    insertPosition(adj(pos))
   }
 })
 
