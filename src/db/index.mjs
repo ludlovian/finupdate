@@ -106,10 +106,52 @@ BEGIN
     AND   NEW.dividend IS NULL;
 END;
 
----- Stock prices ----------------------
+---- Stock market data & prices --------
+
+CREATE VIEW IF NOT EXISTS stocks_in_use_v AS
+  SELECT stockId,
+         ticker
+  FROM   stock
+  WHERE  stockId IN (
+      SELECT stockId
+      FROM   stock_dividend
+      UNION ALL
+      SELECT stockId
+      FROM   position
+      WHERE  qty != '0'
+  );
+
+CREATE TABLE IF NOT EXISTS yahoo_data (
+  stockId INTEGER NOT NULL REFERENCES stock(stockId),
+  kind TEXT NOT NULL,
+  value ANY,
+  updated TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (stockId, kind)
+) WITHOUT ROWID;
+
+CREATE VIEW IF NOT EXISTS yahoo_data_v AS
+  SELECT s.ticker AS ticker,
+         d.kind   AS kind,
+         d.value  AS value
+  FROM   yahoo_data d
+  JOIN   stock s USING (stockId);
+
+CREATE TRIGGER IF NOT EXISTS yahoo_data_v_ti
+  INSTEAD OF INSERT ON yahoo_data_v
+BEGIN
+  INSERT OR IGNORE INTO stock (ticker)
+    VALUES (NEW.ticker);
+  INSERT INTO yahoo_data
+    (stockId, kind, value)
+    SELECT stockId,
+           NEW.kind,
+           NEW.value
+    FROM   stock
+    WHERE  ticker = NEW.ticker;
+END;
 
 CREATE TABLE IF NOT EXISTS stock_price(
-    stockId INTEGER PRIMARY KEY REFERENCES stock(stockId),
+    stockId INTEGER NOT NULL PRIMARY KEY REFERENCES stock(stockId),
     price TEXT NOT NULL,
     source TEXT,
     updated TEXT NOT NULL DEFAULT (datetime('now'))
