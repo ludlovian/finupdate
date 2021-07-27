@@ -1,79 +1,88 @@
+import { get } from 'https'
+
 import log from 'logjs'
 
 import { sql } from '../db/index.mjs'
 import { convertDecimal } from '../import/util.mjs'
-import { fetchIndex, fetchSector, fetchPrice } from './lse.mjs'
 
 const debug = log
   .prefix('fetch:')
   .colour()
   .level(2)
 
-// first try to load prices via collections - indices and sectors
-const attempts = [
-  ['ftse-all-share', fetchIndex],
-  ['ftse-aim-all-share', fetchIndex],
-  ['closed-end-investments', fetchSector]
-]
-
 export default async function fetchPrices () {
-  const needed = new Set(selectActiveStocks())
-  const updates = []
-  for await (const item of getPrices(needed)) {
-    if (item.price) updates.push(item)
+  const tickers = selectActiveStocks().map(s => s + '.L')
+  const url = (
+    'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' +
+    tickers.join(',')
+  )
+  const data = await fetchData(url)
+  if (!data.quoteResponse || data.quoteResponse.error) {
+    throw Object.assign(new Error('Bad response'), { data })
   }
 
-  insertPrices(updates)
+  insertYahooData(data.quoteResponse.result)
+
+  log('data gathered from yahoo')
 }
 
-async function * getPrices (tickers) {
-  const needed = new Set(tickers)
-  const isNeeded = ({ ticker }) => needed.delete(ticker)
+async function fetchData (url) {
+  const res = await getResponse(url)
 
-  for (const [name, fetchFunc] of attempts) {
-    let n = 0
-    for await (const price of fetchFunc(name)) {
-      if (!isNeeded(price)) continue
-      n++
-      yield price
-    }
-    debug('%d prices from %s', n, name)
+  let data = ''
+  res.setEncoding('utf8')
 
-    if (!needed.size) return
+  for await (const chunk of res) {
+    data += chunk
   }
 
-  // now pick up the remaining ones
-  for (const ticker of needed) {
-    yield await fetchPrice(ticker)
+  return JSON.parse(data)
+
+  function getResponse (url) {
+    return new Promise((resolve, reject) => {
+      const req = get(url, res => {
+        const { statusCode } = res
+        if (statusCode >= 400) {
+          const { statusMessage, headers } = res
+          const e = new Error(statusMessage)
+          e.statusMessage = statusMessage
+          e.statusCode = statusCode
+          e.headers = e.headers
+          e.url = e.url
+          return reject(e)
+        }
+        resolve(res)
+      })
+      req.on('error', reject)
+    })
   }
-  debug('%d prices individually: %s', needed.size, [...needed].join(', '))
 }
 
 const selectActiveStocks = sql(`
-  SELECT ticker FROM stock
-  WHERE stockId IN (
-    SELECT stockId FROM stock_dividend
-    UNION
-    SELECT stockId FROM position
-    WHERE qty != '0'
-  )
+  SELECT ticker FROM stocks_in_use_v
 `).pluck().all
 
-const clearOldPrices = sql(`
-  DELETE FROM stock_price
-    WHERE updated < datetime('now', '-' || $days || ' days');
+const clearMarketData = sql(`
+  DELETE from yahoo_data
+  WHERE  stockId IN (
+    SELECT stockId
+    FROM   stocks_in_use_v
+  );
 `)
 
-const insertPrice = sql(`
-  INSERT INTO stock_price_v
-    (ticker, name, price, source)
+const insertValue = sql(`
+  INSERT INTO yahoo_data_v
+    (ticker, kind, value)
   VALUES
-    ($ticker, $name, $price, $source)
+    ($ticker, $kind, $value)
 `)
 
-const insertPrices = sql.transaction(prices => {
-  for (const price of prices) {
-    insertPrice(convertDecimal(price))
+const insertYahooData = sql.transaction(stocks => {
+  clearMarketData()
+  for (const stock of stocks) {
+    ticker = stock.symbol.replace(/\.L/$, '')
+    for (const [kind, value] of Object.entries(stock)) {
+      if (kind !== 'symbol') insertValue({ ticker, kind, value })
+    }
   }
-  clearOldPrices({ days: 7 })
 })
